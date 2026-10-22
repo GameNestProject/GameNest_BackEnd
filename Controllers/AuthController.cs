@@ -68,8 +68,11 @@ public class AuthController : ControllerBase
                 u.Email == dto.Email);
 
         if (existingUser != null)
-        {
-            return BadRequest("Username або Email вже використовується.");
+{
+            return Conflict(new
+            {
+                code = "username_or_email_already_exists"
+            });
         }
 
         // Хешуємо пароль
@@ -88,8 +91,8 @@ public class AuthController : ControllerBase
         await _context.SaveChangesAsync();
 
         return Ok(new
-        {
-            message = "Користувача успішно зареєстровано."
+{
+            code = "registration_success"
         });
     }
     [HttpPost("login")]
@@ -100,7 +103,7 @@ public async Task<IActionResult> Login(LoginDto dto)
 
     if (user == null)
     {
-        return Unauthorized("Неправильний email або пароль.");
+        return Unauthorized("username_or_email_already_exists");
     }
 
     var passwordIsValid = BCrypt.Net.BCrypt.Verify(
@@ -110,7 +113,7 @@ public async Task<IActionResult> Login(LoginDto dto)
 
     if (!passwordIsValid)
     {
-        return Unauthorized("Неправильний email або пароль.");
+        return Unauthorized("username_or_email_already_exists");
     }
 
     var token = CreateToken(user);
