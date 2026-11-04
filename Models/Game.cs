@@ -18,7 +18,11 @@ public class Game
 
     public DateTime? ReleaseDate { get; set; }
 
+    public int? GameTitleId { get; set; }
+    public bool IsArchived { get; set; }
+
     public ICollection<UserGame> UserGames { get; set; } = new List<UserGame>();
 
     public ICollection<GameSubmission> GameSubmissions { get; set; } = new List<GameSubmission>();
+    public GameTitle? GameTitle { get; set; }
 }

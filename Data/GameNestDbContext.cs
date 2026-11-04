@@ -36,6 +36,26 @@ public class GameNestDbContext : DbContext
             .WithMany(g => g.UserGames)
             .HasForeignKey(ug => ug.GameId);
 
+        modelBuilder.Entity<UserGame>()
+            .HasIndex(ug => new { ug.UserId, ug.GameId })
+            .IsUnique();
+
+        modelBuilder.Entity<GameTitle>()
+            .HasIndex(gt => gt.Title)
+            .IsUnique();
+
+        modelBuilder.Entity<Game>()
+            .HasOne(g => g.GameTitle)
+            .WithMany(gt => gt.Games)
+            .HasForeignKey(g => g.GameTitleId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        modelBuilder.Entity<UserCreatedGame>()
+            .HasOne(ucg => ucg.User)
+            .WithMany(u => u.UserCreatedGames)
+            .HasForeignKey(ucg => ucg.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
         // GameSubmission → User (хто подав)
         modelBuilder.Entity<GameSubmission>()
             .HasOne(gs => gs.SubmittedByUser)
@@ -65,4 +85,6 @@ public class GameNestDbContext : DbContext
     public DbSet<UserGame> UserGames { get; set; }
 
     public DbSet<GameSubmission> GameSubmissions { get; set; }
+    public DbSet<GameTitle> GameTitles { get; set; }
+    public DbSet<UserCreatedGame> UserCreatedGames { get; set; }
 }

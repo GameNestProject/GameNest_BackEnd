@@ -7,6 +7,8 @@ using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
+using System.Security.Cryptography;
+using GameNest_BackEnd.Services;
 
 namespace GameNest_BackEnd.Controllers;
 
@@ -15,11 +17,14 @@ namespace GameNest_BackEnd.Controllers;
 public class AuthController : ControllerBase
 {
     private readonly GameNestDbContext _context;
+    private readonly IEmailSender _emailSender;
 
-    public AuthController(GameNestDbContext context)
+    public AuthController(GameNestDbContext context, IEmailSender emailSender)
     {
         _context = context;
+        _emailSender = emailSender;
     }
+    private static string HashConfirmationToken(string token) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
     private string CreateToken(User user)
 {
     var claims = new List<Claim>
@@ -79,21 +84,43 @@ public class AuthController : ControllerBase
         var passwordHash = BCrypt.Net.BCrypt.HashPassword(dto.Password);
 
         // Створюємо користувача
+        var confirmationToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
         var user = new User
         {
             Username = dto.Username,
             Email = dto.Email,
             PasswordHash = passwordHash,
-            Role = "User"
+            Role = "User",
+            EmailConfirmed = false,
+            EmailConfirmationTokenHash = HashConfirmationToken(confirmationToken),
+            EmailConfirmationTokenExpiresAt = DateTime.UtcNow.AddHours(24)
         };
 
         _context.Users.Add(user);
         await _context.SaveChangesAsync();
+        await _emailSender.SendEmailConfirmationAsync(user.Email, confirmationToken, HttpContext.RequestAborted);
 
         return Ok(new
 {
             code = "registration_success"
         });
+    }
+    [HttpPost("confirm-email")]
+    public async Task<IActionResult> ConfirmEmail(ConfirmEmailDto dto)
+    {
+        var user = await _context.Users.SingleOrDefaultAsync(u => u.Email == dto.Email);
+        if (user is null || user.EmailConfirmed || user.EmailConfirmationTokenExpiresAt <= DateTime.UtcNow ||
+            user.EmailConfirmationTokenHash is null || !CryptographicOperations.FixedTimeEquals(
+                Convert.FromHexString(user.EmailConfirmationTokenHash), Convert.FromHexString(HashConfirmationToken(dto.Token))))
+        {
+            return BadRequest(new { code = "invalid_or_expired_confirmation_token" });
+        }
+
+        user.EmailConfirmed = true;
+        user.EmailConfirmationTokenHash = null;
+        user.EmailConfirmationTokenExpiresAt = null;
+        await _context.SaveChangesAsync();
+        return Ok(new { code = "email_confirmed" });
     }
     [HttpPost("login")]
 public async Task<IActionResult> Login(LoginDto dto)
@@ -114,6 +141,11 @@ public async Task<IActionResult> Login(LoginDto dto)
     if (!passwordIsValid)
     {
         return Unauthorized("username_or_email_already_exists");
+    }
+
+    if (!user.EmailConfirmed)
+    {
+        return Unauthorized(new { code = "email_not_confirmed" });
     }
 
     var token = CreateToken(user);
