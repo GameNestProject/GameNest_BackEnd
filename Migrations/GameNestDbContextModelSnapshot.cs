@@ -42,6 +42,12 @@ namespace GameNest_BackEnd.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<int?>("GameTitleId")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("IsArchived")
+                        .HasColumnType("boolean");
+
                     b.Property<string>("Publisher")
                         .IsRequired()
                         .HasColumnType("text");
@@ -58,6 +64,8 @@ namespace GameNest_BackEnd.Migrations
                         .HasColumnType("text");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("GameTitleId");
 
                     b.ToTable("Games");
                 });
@@ -131,6 +139,26 @@ namespace GameNest_BackEnd.Migrations
                     b.ToTable("GameSubmissions");
                 });
 
+            modelBuilder.Entity("GameNest_BackEnd.Models.GameTitle", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Title")
+                        .IsUnique();
+
+                    b.ToTable("GameTitles");
+                });
+
             modelBuilder.Entity("GameNest_BackEnd.Models.User", b =>
                 {
                     b.Property<int>("Id")
@@ -142,6 +170,21 @@ namespace GameNest_BackEnd.Migrations
                     b.Property<string>("Email")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<DateTime?>("EmailConfirmationTokenExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("EmailConfirmationTokenHash")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("EmailConfirmed")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsLibraryPublic")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsProfilePublic")
+                        .HasColumnType("boolean");
 
                     b.Property<string>("PasswordHash")
                         .IsRequired()
@@ -164,6 +207,47 @@ namespace GameNest_BackEnd.Migrations
                         .IsUnique();
 
                     b.ToTable("Users");
+                });
+
+            modelBuilder.Entity("GameNest_BackEnd.Models.UserCreatedGame", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("CoverUrl")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Description")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Developer")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Publisher")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("ReleaseDate")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("UserId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("UserCreatedGames");
                 });
 
             modelBuilder.Entity("GameNest_BackEnd.Models.UserGame", b =>
@@ -191,9 +275,20 @@ namespace GameNest_BackEnd.Migrations
 
                     b.HasIndex("GameId");
 
-                    b.HasIndex("UserId");
+                    b.HasIndex("UserId", "GameId")
+                        .IsUnique();
 
                     b.ToTable("UserGames");
+                });
+
+            modelBuilder.Entity("GameNest_BackEnd.Models.Game", b =>
+                {
+                    b.HasOne("GameNest_BackEnd.Models.GameTitle", "GameTitle")
+                        .WithMany("Games")
+                        .HasForeignKey("GameTitleId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("GameTitle");
                 });
 
             modelBuilder.Entity("GameNest_BackEnd.Models.GameSubmission", b =>
@@ -219,6 +314,17 @@ namespace GameNest_BackEnd.Migrations
                     b.Navigation("ReviewedByUser");
 
                     b.Navigation("SubmittedByUser");
+                });
+
+            modelBuilder.Entity("GameNest_BackEnd.Models.UserCreatedGame", b =>
+                {
+                    b.HasOne("GameNest_BackEnd.Models.User", "User")
+                        .WithMany("UserCreatedGames")
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("GameNest_BackEnd.Models.UserGame", b =>
@@ -247,9 +353,16 @@ namespace GameNest_BackEnd.Migrations
                     b.Navigation("UserGames");
                 });
 
+            modelBuilder.Entity("GameNest_BackEnd.Models.GameTitle", b =>
+                {
+                    b.Navigation("Games");
+                });
+
             modelBuilder.Entity("GameNest_BackEnd.Models.User", b =>
                 {
                     b.Navigation("GameSubmissions");
+
+                    b.Navigation("UserCreatedGames");
 
                     b.Navigation("UserGames");
                 });

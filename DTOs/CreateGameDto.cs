@@ -1,8 +1,10 @@
+using System.ComponentModel.DataAnnotations;
+
 namespace GameNest_BackEnd.DTOs;
 
 public class CreateGameDto
 {
-    public string Title { get; set; } = string.Empty;
+    [Required, StringLength(200)] public string Title { get; set; } = string.Empty;
 
     public string Description { get; set; } = string.Empty;
 
@@ -15,4 +17,5 @@ public class CreateGameDto
     public string Publisher { get; set; } = string.Empty;
 
     public DateTime? ReleaseDate { get; set; }
+    public int? GameTitleId { get; set; }
 }
