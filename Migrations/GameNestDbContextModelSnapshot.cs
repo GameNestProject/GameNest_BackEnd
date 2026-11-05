@@ -136,7 +136,12 @@ namespace GameNest_BackEnd.Migrations
 
                     b.HasIndex("SubmittedByUserId");
 
-                    b.ToTable("GameSubmissions");
+                    b.ToTable("GameSubmissions", t =>
+                        {
+                            t.HasCheckConstraint("CK_GameSubmissions_Status", "\"Status\" IN ('Pending', 'Approved', 'Rejected')");
+
+                            t.HasCheckConstraint("CK_GameSubmissions_Type", "\"Type\" IN ('NewGame', 'Correction')");
+                        });
                 });
 
             modelBuilder.Entity("GameNest_BackEnd.Models.GameTitle", b =>
@@ -278,7 +283,10 @@ namespace GameNest_BackEnd.Migrations
                     b.HasIndex("UserId", "GameId")
                         .IsUnique();
 
-                    b.ToTable("UserGames");
+                    b.ToTable("UserGames", t =>
+                        {
+                            t.HasCheckConstraint("CK_UserGames_Status", "\"Status\" IN ('Planned', 'Playing', 'Completed', 'Dropped', 'OnHold')");
+                        });
                 });
 
             modelBuilder.Entity("GameNest_BackEnd.Models.Game", b =>
@@ -332,7 +340,7 @@ namespace GameNest_BackEnd.Migrations
                     b.HasOne("GameNest_BackEnd.Models.Game", "Game")
                         .WithMany("UserGames")
                         .HasForeignKey("GameId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.HasOne("GameNest_BackEnd.Models.User", "User")

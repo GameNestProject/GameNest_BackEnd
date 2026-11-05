@@ -28,17 +28,29 @@ public class GameNestDbContext : DbContext
         modelBuilder.Entity<UserGame>()
             .HasOne(ug => ug.User)
             .WithMany(u => u.UserGames)
-            .HasForeignKey(ug => ug.UserId);
+            .HasForeignKey(ug => ug.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
 
         // UserGame → Game
         modelBuilder.Entity<UserGame>()
             .HasOne(ug => ug.Game)
             .WithMany(g => g.UserGames)
-            .HasForeignKey(ug => ug.GameId);
+            .HasForeignKey(ug => ug.GameId)
+            .OnDelete(DeleteBehavior.Restrict);
 
         modelBuilder.Entity<UserGame>()
             .HasIndex(ug => new { ug.UserId, ug.GameId })
             .IsUnique();
+
+        modelBuilder.Entity<UserGame>()
+            .ToTable(t => t.HasCheckConstraint("CK_UserGames_Status", "\"Status\" IN ('Planned', 'Playing', 'Completed', 'Dropped', 'OnHold')"));
+
+        modelBuilder.Entity<GameSubmission>()
+            .ToTable(t =>
+            {
+                t.HasCheckConstraint("CK_GameSubmissions_Type", "\"Type\" IN ('NewGame', 'Correction')");
+                t.HasCheckConstraint("CK_GameSubmissions_Status", "\"Status\" IN ('Pending', 'Approved', 'Rejected')");
+            });
 
         modelBuilder.Entity<GameTitle>()
             .HasIndex(gt => gt.Title)
