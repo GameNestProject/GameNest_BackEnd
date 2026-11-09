@@ -51,7 +51,7 @@ GameNest_BackEnd/
    cd GameNest_BackEnd
    ```
 
-2. Configure the database connection string and JWT settings using .NET User Secrets or environment variables.
+2. Configure the secrets as described in [Configuration](#configuration).
 
 3. Apply database migrations:
 
@@ -66,6 +66,46 @@ GameNest_BackEnd/
    ```
 
 5. Open the Swagger UI using the URL shown in the console output, followed by `/swagger`.
+
+## Configuration
+
+`appsettings.json` contains only non-secret settings (`Jwt:Issuer`, `Jwt:Audience`, logging).
+Secrets are never committed. The application refuses to start if any of these settings is missing or empty:
+
+| Setting | Secret | Description |
+|---|---|---|
+| `ConnectionStrings:DefaultConnection` | yes | PostgreSQL connection string |
+| `Jwt:Key` | yes | JWT signing key, at least 32 bytes (64 random bytes recommended) |
+| `Jwt:Issuer` | no | Defined in `appsettings.json` |
+| `Jwt:Audience` | no | Defined in `appsettings.json` |
+
+### Development: User Secrets
+
+Run from the project directory (PowerShell). Every developer generates their own JWT key; keys are never shared.
+
+```powershell
+# PostgreSQL connection string (replace the placeholders)
+dotnet user-secrets set "ConnectionStrings:DefaultConnection" "Host=localhost;Port=5432;Database=gamenest;Username=<user>;Password=<password>"
+
+# Generate and store a random 64-byte JWT key
+$bytes = New-Object byte[] 64
+[System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+dotnet user-secrets set "Jwt:Key" ([Convert]::ToBase64String($bytes))
+Remove-Variable bytes
+```
+
+### Production: environment variables
+
+User Secrets are loaded only in the `Development` environment. In Production, provide secrets as environment variables
+(`__` replaces `:`), using the hosting provider's secret storage:
+
+```text
+ASPNETCORE_ENVIRONMENT=Production
+ConnectionStrings__DefaultConnection=<connection string>
+Jwt__Key=<signing key>
+```
+
+Do not put secrets into `appsettings.json` or `appsettings.Production.json`.
 
 ## Security
 

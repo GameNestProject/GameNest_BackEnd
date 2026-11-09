@@ -8,14 +8,24 @@ using GameNest_BackEnd.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-var jwtKey = builder.Configuration["Jwt:Key"]
-    ?? throw new InvalidOperationException("Jwt:Key must be configured.");
-var jwtIssuer = builder.Configuration["Jwt:Issuer"]
-    ?? throw new InvalidOperationException("Jwt:Issuer must be configured.");
-var jwtAudience = builder.Configuration["Jwt:Audience"]
-    ?? throw new InvalidOperationException("Jwt:Audience must be configured.");
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
-    ?? throw new InvalidOperationException("ConnectionStrings:DefaultConnection must be configured.");
+// Secrets are never stored in appsettings.json: use User Secrets in Development
+// and environment variables (e.g. Jwt__Key, ConnectionStrings__DefaultConnection) in Production.
+static string RequireSetting(IConfiguration configuration, string key)
+{
+    var value = configuration[key];
+    if (string.IsNullOrWhiteSpace(value))
+        throw new InvalidOperationException(
+            $"{key} must be configured (User Secrets in Development, environment variables in Production).");
+    return value;
+}
+
+var jwtKey = RequireSetting(builder.Configuration, "Jwt:Key");
+// HMAC-SHA256 requires a key of at least 256 bits.
+if (Encoding.UTF8.GetByteCount(jwtKey) < 32)
+    throw new InvalidOperationException("Jwt:Key must be at least 32 bytes (256 bits) long.");
+var jwtIssuer = RequireSetting(builder.Configuration, "Jwt:Issuer");
+var jwtAudience = RequireSetting(builder.Configuration, "Jwt:Audience");
+var connectionString = RequireSetting(builder.Configuration, "ConnectionStrings:DefaultConnection");
 
 builder.Services.AddControllers();
 builder.Services.AddScoped<IEmailSender, LoggingEmailSender>();
@@ -43,10 +53,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     });
 
 builder.Services.AddDbContext<GameNestDbContext>(options =>
-    options.UseNpgsql(
-        connectionString
-    )
-);
+    options.UseNpgsql(connectionString));
 
 // Swagger
 builder.Services.AddEndpointsApiExplorer();
