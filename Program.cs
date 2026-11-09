@@ -43,10 +43,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     });
 
 builder.Services.AddDbContext<GameNestDbContext>(options =>
-    options.UseNpgsql(
-        connectionString
-    )
-);
+    options.UseNpgsql(connectionString));
 
 // Swagger
 builder.Services.AddEndpointsApiExplorer();
