@@ -1,6 +1,6 @@
 # 🎮 GameNest Backend
 
-![GameNest Banner](https://via.placeholder.com/1000x250?text=GameNest+Backend+API)
+![GameNest Banner]([https://via.placeholder.com/1000x250?text=GameNest+Backend+API](https://avatars.githubusercontent.com/u/341990373?s=200&v=4))
 
 GameNest — це сучасний вебзастосунок для трекінгу ігор. Цей репозиторій містить серверну частину (BackEnd) проєкту, що забезпечує роботу з базою даних, авторизацію користувачів та бізнес-логіку управління особистими ігровими бібліотеками.
 
