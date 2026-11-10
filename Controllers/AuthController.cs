@@ -19,6 +19,11 @@ public class AuthController(GameNestDbContext context, IEmailSender emailSender,
 {
     private static readonly TimeSpan ConfirmationTokenLifetime = TimeSpan.FromHours(24);
 
+    // Hash of a random secret nobody knows, created once per process with the same work factor as real
+    // password hashes. Verifying against it for unknown emails keeps login timing uniform.
+    private static readonly Lazy<string> DummyPasswordHash =
+        new(() => BCrypt.Net.BCrypt.HashPassword(Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))));
+
     private static string HashConfirmationToken(string token) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
     private static string NormalizeEmail(string email) => email.Trim().ToLowerInvariant();
     private static string CreateConfirmationToken() => Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
@@ -111,7 +116,9 @@ public class AuthController(GameNestDbContext context, IEmailSender emailSender,
     {
         var email = NormalizeEmail(dto.Email);
         var user = await context.Users.SingleOrDefaultAsync(u => u.Email == email, HttpContext.RequestAborted);
-        if (user is null || !BCrypt.Net.BCrypt.Verify(dto.Password, user.PasswordHash)) return Unauthorized(new { code = "invalid_credentials" });
+        // Always run one BCrypt verification so that unknown emails take as long as wrong passwords.
+        var passwordValid = BCrypt.Net.BCrypt.Verify(dto.Password, user?.PasswordHash ?? DummyPasswordHash.Value);
+        if (user is null || !passwordValid) return Unauthorized(new { code = "invalid_credentials" });
         if (!user.EmailConfirmed) return Unauthorized(new { code = "email_not_confirmed" });
         return Ok(new { token = CreateToken(user) });
     }
