@@ -17,8 +17,35 @@ public class GoogleAuthOptions
         !string.IsNullOrWhiteSpace(clientId) && clientId.Trim().EndsWith(ClientIdSuffix, StringComparison.Ordinal) && !clientId.Contains(' ');
 }
 
+/// <summary>How much Google can be trusted about current ownership of the email address.</summary>
+public enum GoogleEmailKind
+{
+    /// <summary>A Gmail address (<c>@gmail.com</c> / <c>@googlemail.com</c>): Google operates the mailbox.</summary>
+    Gmail,
+    /// <summary>A Google Workspace account: the token has <c>hd</c> and the email is on that domain.</summary>
+    Workspace,
+    /// <summary>Any other address (a Google account created with an external email): Google verified it once, but is not authoritative now.</summary>
+    Other
+}
+
 /// <summary>Identity facts taken only from a cryptographically verified Google ID token.</summary>
-public sealed record GoogleIdentity(string Subject, string Email, string? Name, string? PictureUrl);
+/// <param name="HostedDomain">The <c>hd</c> claim (Google Workspace domain), lower-case, or null.</param>
+public sealed record GoogleIdentity(string Subject, string Email, string? Name, string? PictureUrl, string? HostedDomain = null)
+{
+    public GoogleEmailKind EmailKind => Classify(Email, HostedDomain);
+
+    /// <summary>True when Google is authoritative for the address (Gmail or Workspace), so it may confirm the email and auto-link accounts.</summary>
+    public bool IsEmailAuthoritative => EmailKind != GoogleEmailKind.Other;
+
+    public static GoogleEmailKind Classify(string email, string? hostedDomain)
+    {
+        var at = email.LastIndexOf('@');
+        var domain = at < 0 ? string.Empty : email[(at + 1)..].ToLowerInvariant();
+        if (!string.IsNullOrWhiteSpace(hostedDomain))
+            return domain == hostedDomain.Trim().ToLowerInvariant() ? GoogleEmailKind.Workspace : GoogleEmailKind.Other;
+        return domain is "gmail.com" or "googlemail.com" ? GoogleEmailKind.Gmail : GoogleEmailKind.Other;
+    }
+}
 
 /// <summary>The ID token is invalid (signature, issuer, audience, lifetime, claims) or the Google email is unverified.</summary>
 public class GoogleTokenRejectedException(string code, string reason) : Exception(reason)
@@ -146,7 +173,8 @@ public sealed class GoogleTokenValidator : IGoogleTokenValidator
             : null;
 
         // Same normalization as email/password registration (AuthController.NormalizeEmail).
-        return new GoogleIdentity(payload.Subject, payload.Email.Trim().ToLowerInvariant(), name?.Trim(), picture);
+        var hostedDomain = string.IsNullOrWhiteSpace(payload.HostedDomain) ? null : payload.HostedDomain.Trim().ToLowerInvariant();
+        return new GoogleIdentity(payload.Subject, payload.Email.Trim().ToLowerInvariant(), name?.Trim(), picture, hostedDomain);
     }
 
     private static bool AudienceContains(object? audience, string clientId) => audience switch

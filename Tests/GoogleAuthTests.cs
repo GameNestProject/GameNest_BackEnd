@@ -70,8 +70,10 @@ public class GoogleOnlyApiFactory : GoogleApiFactory
 
 public class GoogleAuthEndpointTests(GoogleApiFactory factory) : IClassFixture<GoogleApiFactory>
 {
-    private static GoogleIdentity NewIdentity(string? name = "Test Player", string? email = null) =>
-        new("google-sub-" + Guid.NewGuid().ToString("N"), email ?? $"g{TestHelpers.UniqueSuffix()}@gmail.test", name, "https://lh3.googleusercontent.test/a/photo");
+    private static GoogleIdentity NewIdentity(string? name = "Test Player", string? email = null, string? hostedDomain = null) =>
+        new("google-sub-" + Guid.NewGuid().ToString("N"), email ?? $"g{TestHelpers.UniqueSuffix()}@gmail.com", name, "https://lh3.googleusercontent.test/a/photo", hostedDomain);
+
+    private static string GmailAddress() => $"player{TestHelpers.UniqueSuffix()}@gmail.com";
 
     private async Task<(HttpResponseMessage Response, JsonElement Body)> PostGoogleAsync(object body)
     {
@@ -149,9 +151,9 @@ public class GoogleAuthEndpointTests(GoogleApiFactory factory) : IClassFixture<G
     }
 
     [Fact]
-    public async Task Confirmed_password_account_with_the_same_email_is_linked_and_keeps_its_role_and_password()
+    public async Task Gmail_account_is_linked_to_the_confirmed_account_and_keeps_its_role_and_password()
     {
-        var admin = await factory.SeedUserAsync(role: "Admin", password: "existing-password-1");
+        var admin = await factory.SeedUserAsync(role: "Admin", password: "existing-password-1", email: GmailAddress());
         var identity = NewIdentity(email: admin.Email);
 
         var (response, body) = await PostGoogleAsync(new { idToken = factory.Google.Issue(identity) });
@@ -169,7 +171,7 @@ public class GoogleAuthEndpointTests(GoogleApiFactory factory) : IClassFixture<G
     [Fact]
     public async Task Unconfirmed_account_with_the_same_email_is_not_linked()
     {
-        var unconfirmed = await factory.SeedUserAsync(emailConfirmed: false);
+        var unconfirmed = await factory.SeedUserAsync(emailConfirmed: false, email: GmailAddress());
 
         var (response, body) = await PostGoogleAsync(new { idToken = factory.Google.Issue(NewIdentity(email: unconfirmed.Email)) });
 
@@ -280,7 +282,7 @@ public class GoogleOnlyModeTests(GoogleOnlyApiFactory factory) : IClassFixture<G
     public async Task Password_registration_and_login_are_disabled_but_google_works()
     {
         var client = factory.CreateClient();
-        var seeded = await factory.SeedUserAsync(password: "seeded-password-1");
+        var seeded = await factory.SeedUserAsync(password: "seeded-password-1", email: $"seeded{TestHelpers.UniqueSuffix()}@gmail.com");
 
         var register = await client.PostAsJsonAsync("/api/Auth/register", new { username = "pw" + TestHelpers.UniqueSuffix(), email = $"pw{TestHelpers.UniqueSuffix()}@test.local", password = "some-password-123" });
         var login = await client.PostAsJsonAsync("/api/Auth/login", new { email = seeded.Email, password = "seeded-password-1" });
@@ -293,13 +295,29 @@ public class GoogleOnlyModeTests(GoogleOnlyApiFactory factory) : IClassFixture<G
         Assert.Equal(HttpStatusCode.Forbidden, resend.StatusCode);
         Assert.Empty(factory.SentConfirmations);
 
-        // The existing confirmed account is still reachable through Google with the same email.
+        // The existing confirmed Gmail account is still reachable through Google with the same email.
         var google = await client.PostAsJsonAsync("/api/Auth/google", new
         {
             idToken = factory.Google.Issue(new GoogleIdentity("sub-" + Guid.NewGuid().ToString("N"), seeded.Email, "Seeded", null))
         });
         Assert.Equal(HttpStatusCode.OK, google.StatusCode);
         Assert.Equal(seeded.Id, (await google.ReadJsonAsync()).GetProperty("user").GetProperty("id").GetInt32());
+    }
+
+    [Fact]
+    public async Task Third_party_account_cannot_auto_link_while_password_login_is_off()
+    {
+        // Documents the lock-out risk the transition plan addresses: such users need Auth__PasswordLoginEnabled=true
+        // to sign in once and link Google explicitly.
+        var seeded = await factory.SeedUserAsync(email: $"legacy{TestHelpers.UniqueSuffix()}@company.test");
+
+        var google = await factory.CreateClient().PostAsJsonAsync("/api/Auth/google", new
+        {
+            idToken = factory.Google.Issue(new GoogleIdentity("sub-" + Guid.NewGuid().ToString("N"), seeded.Email, "Legacy", null))
+        });
+
+        Assert.Equal(HttpStatusCode.Conflict, google.StatusCode);
+        Assert.Equal("account_link_required", (await google.ReadJsonAsync()).GetProperty("code").GetString());
     }
 }
 

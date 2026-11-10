@@ -122,7 +122,7 @@ or invalid (it never falls back to a built-in key or connection string).
 | `Resend__TimeoutSeconds` | no | no | Timeout of a Resend request, default `15` |
 | `Google__ClientId` | yes outside Development | no | OAuth 2.0 **Web** client ID (`….apps.googleusercontent.com`). No client secret is needed |
 | `Auth__PasswordRegistrationEnabled` | no | no | `false` by default (`true` in `appsettings.Development.json`): register + resend-confirmation |
-| `Auth__PasswordLoginEnabled` | no | no | `false` by default (`true` in `appsettings.Development.json`): email/password login |
+| `Auth__PasswordLoginEnabled` | no | no | `true` by default during the transition to Google (see "Email/password flow and the transition to Google") |
 | `PORT` | no | no | Port to listen on (all interfaces). Set automatically by Render |
 | `RateLimiting__Auth__PermitLimit` / `__WindowSeconds` | no | no | Default `10` / `60`: register, login, confirm-email |
 | `RateLimiting__ResendConfirmation__PermitLimit` / `__WindowSeconds` | no | no | Default `5` / `900` |
@@ -243,6 +243,22 @@ the version with Google sign-in**, otherwise that version fails on its first dat
 (`dotnet ef database update AuditDataIntegrity`) deletes all Google links and fails while Google-only users
 (without a password) exist.
 
+It does not create or change the unique indexes on `Users.Email` / `Users.Username` (they exist since
+`FinalizeMvpModels`), so it cannot fail because of duplicates in existing data. Those indexes are case-sensitive,
+however, and emails were not normalized before the email-confirmation release. Before deploying, run these
+read-only checks against the target database (e.g. in the Neon SQL Editor); all of them should return no rows:
+
+```sql
+-- Emails that differ only in case or surrounding spaces (Google sign-in answers 409 duplicate_accounts_for_email)
+SELECT lower(trim("Email")) AS email, count(*) FROM "Users" GROUP BY 1 HAVING count(*) > 1;
+-- Usernames that differ only in case (allowed by the index, but confusing)
+SELECT lower("Username") AS username, count(*) FROM "Users" GROUP BY 1 HAVING count(*) > 1;
+-- Emails that are not normalized (still found by Google sign-in, but not by password login or the admin command)
+SELECT "Id", "Email" FROM "Users" WHERE "Email" <> lower(trim("Email"));
+-- Which migrations are applied
+SELECT "MigrationId" FROM "__EFMigrationsHistory" ORDER BY 1;
+```
+
 ### Option A — `dotnet ef database update` from your computer
 
 Run from the repository root in PowerShell. The command builds the app in the `Development` environment, so the
@@ -328,6 +344,8 @@ Errors (body `{"code": "..."}`, never stack traces):
 | `401` | `google_email_not_verified` | `email_verified` is not `true` |
 | `409` | `email_registered_unconfirmed` | An email/password account with this email exists but was never confirmed — not linked automatically |
 | `409` | `account_linked_to_another_google_account` | The account with this email is already linked to a different Google account |
+| `409` | `account_link_required` | An account with this email exists, but Google is not authoritative for the address (not Gmail, no matching Workspace `hd`): sign in with the password and link explicitly (`POST /api/Auth/google/link`) |
+| `409` | `duplicate_accounts_for_email` | Several legacy accounts differ only in the case of this email; an administrator must merge/clean them up |
 | `429` | `too_many_requests` | Rate limit |
 | `503` | `google_auth_unavailable` | Google's signing certificates could not be downloaded; retry later |
 | `503` | `google_auth_not_configured` | `Google__ClientId` is not set (possible only in Development) |
@@ -342,15 +360,46 @@ Errors (body `{"code": "..."}`, never stack traces):
    Only these verified claims are used; any other fields in the request body are ignored.
 2. The user is looked up by the Google account id (`sub`) in `ExternalLogins` — not by email, because a Google
    email can change. Found → sign in (role unchanged).
-3. Not found, but a user with the same (normalized, lower-case) email exists:
-   - email confirmed and no Google account linked yet → the Google identity is **linked** to that account (password,
-     role and data unchanged);
+3. Not found, but a user with the same email exists (compared case-insensitively, so accounts created before email
+   normalization are found too; several case variants → `409 duplicate_accounts_for_email`):
+   - already linked to another Google account → `409 account_linked_to_another_google_account` (a linked `sub` is never replaced);
    - email not confirmed → `409 email_registered_unconfirmed` (prevents taking over an account someone registered
      with an address they do not own);
-   - already linked to another Google account → `409 account_linked_to_another_google_account`.
-4. Otherwise a new user is created: verified Google email (`EmailConfirmed = true`), role `User`, **no password**
-   (`PasswordHash = null`, so password login is impossible for it), username from the Google name (letters/digits,
-   unique suffix on collisions; the email is never used as a public username), avatar from the Google picture (https only).
+   - Google is **not authoritative** for the address → `409 account_link_required` (see the table below);
+   - otherwise the Google identity is **linked** to that account. Role, password, email and `EmailConfirmed` are not changed.
+4. Otherwise a new user is created: role `User`, **no password** (`PasswordHash = null`, so password login is impossible
+   for it), username from the Google name (letters/digits, unique suffix on collisions; the email is never used as a
+   public username), avatar from the Google picture (https only). `EmailConfirmed` depends on the email kind (below).
+
+| Email kind | How it is detected | Auto-link to an existing confirmed account | `EmailConfirmed` for a new user |
+|---|---|---|---|
+| Gmail | address ends with `@gmail.com` or `@googlemail.com` | yes | `true` — Google operates the mailbox |
+| Google Workspace | `email_verified` and the `hd` claim is present **and equals the email's domain** | yes | `true` — the domain's administrator controls the account |
+| Other (Google account with an external address, or `hd` on a different domain) | everything else | **no** → `account_link_required` | `false` — Google checked the address once, but is not authoritative for its current owner |
+
+A user of the "Other" kind can still sign up and sign in with Google (the account is found by `sub`); only the
+email is not treated as confirmed. Consequences: such an account cannot be promoted with the admin command (it
+requires a confirmed email) and its email does not prove ownership for any future email-based feature.
+
+### Explicit linking: `POST /api/Auth/google/link`
+
+Recovery path for `account_link_required` and for any existing password account (the emails do not need to match):
+
+```http
+POST /api/Auth/google/link
+Authorization: Bearer <GameNest JWT from POST /api/Auth/login>
+Content-Type: application/json
+
+{ "idToken": "<Google ID token>", "password": "<current account password>" }
+```
+
+The JWT proves the session, the password re-confirms the account owner (a stolen JWT alone cannot attach an
+attacker's Google account), and the ID token proves control of the Google account. Responses:
+`200 google_account_linked` / `200 google_account_already_linked`, `401 invalid_credentials` (wrong password),
+`401 invalid_google_token` / `google_email_not_verified`, `409 account_linked_to_another_google_account` (this user
+already has a different Google account), `409 google_account_linked_to_another_user`, `409 account_has_no_password`
+(Google-only account — nothing to link). Rate limited like the other authentication endpoints. Role, password,
+email and `EmailConfirmed` are not changed.
 5. Unique indexes (`ExternalLogins(Provider, ProviderSubject)`, `ExternalLogins(UserId, Provider)`, `Users(Email)`,
    `Users(Username)`) make concurrent requests safe; a conflicting insert is retried from the start (up to 3 times).
 
@@ -371,22 +420,44 @@ admin command (see "First Administrator").
 4. Copy the **Client ID** (`….apps.googleusercontent.com`) into Render as `Google__ClientId` and into the frontend
    configuration. The **client secret is not used** — do not put it anywhere.
 
-### Email/password flow (switched off for the MVP)
+### Email/password flow and the transition to Google
 
-The email/password endpoints, email confirmation and Resend are kept, but in production they are disabled by default:
+The email/password endpoints, email confirmation and Resend are kept. New public accounts are created only through
+Google; password **login** stays on by default so that existing accounts never lose access:
 
-| Setting | Default | Endpoints | When disabled |
+| Setting | Default (production) | Endpoints | When disabled |
 |---|---|---|---|
 | `Auth__PasswordRegistrationEnabled` | `false` | `POST /api/Auth/register`, `POST /api/Auth/resend-confirmation` | `403 {"code":"password_registration_disabled"}` |
-| `Auth__PasswordLoginEnabled` | `false` | `POST /api/Auth/login` | `403 {"code":"password_login_disabled"}` |
+| `Auth__PasswordLoginEnabled` | `true` (transition) | `POST /api/Auth/login` | `403 {"code":"password_login_disabled"}` |
 
 `POST /api/Auth/confirm-email` stays available (it only completes links that were already sent).
-In Development both flags are `true` (`appsettings.Development.json`) so local work without Google keeps working.
+In Development both flags are `true` (`appsettings.Development.json`).
 
-**Existing password accounts:** while password login is off, a user with a **confirmed** email signs in with the
-Google account of the same address, and the accounts are linked automatically. Accounts whose email is not a Google
-account, or that were never confirmed, cannot sign in. If such accounts matter, set `Auth__PasswordLoginEnabled=true`
-in Render (no redeploy of code needed) until they have moved to Google.
+What happens to existing accounts:
+
+| Existing account | Password login on | Password login off |
+|---|---|---|
+| Confirmed, Gmail / matching Workspace | password, or Google (auto-linked) | Google (auto-linked) |
+| Confirmed, other address (e.g. `@gamenest.pp.ua` without Workspace, Outlook) | password; links Google via `/google/link` | **only if Google was linked before** — otherwise locked out |
+| Not confirmed | cannot log in (unchanged) | cannot log in |
+| Admin | as above for its email kind | as above — make sure every admin has Google linked first |
+
+Transition plan:
+
+1. Deploy with the defaults (registration off, login on) and apply the `AddExternalLogins` migration.
+2. Ask every existing user — administrators first — to sign in and link Google (automatic for Gmail/Workspace,
+   `POST /api/Auth/google/link` otherwise; the frontend needs a "Link Google account" action in the profile).
+3. Check who is still unlinked (read-only):
+
+   ```sql
+   SELECT u."Id", u."Username", u."Email", u."Role"
+   FROM "Users" u
+   WHERE u."PasswordHash" IS NOT NULL AND u."EmailConfirmed"
+     AND NOT EXISTS (SELECT 1 FROM "ExternalLogins" l WHERE l."UserId" = u."Id" AND l."Provider" = 'Google');
+   ```
+
+4. When nobody (or nobody who matters) is left, set `Auth__PasswordLoginEnabled=false` in Render. If someone is
+   locked out later, set it back to `true` temporarily (configuration only, no code change), let them link, and switch it off again.
 
 ### Testing locally
 
@@ -597,6 +668,11 @@ Do not add anything to Render for this — the command is run locally only.
 8. The health check does not verify database connectivity.
 9. Migrations must be applied manually (see above).
 10. Users cannot unlink Google or set a password; there is no account-deletion endpoint.
+11. An unconfirmed email/password account blocks Google sign-up for that address (`409 email_registered_unconfirmed`)
+    until an administrator deletes the stale account; nothing is taken over automatically.
+12. A Google account with an external address (kind "Other") occupies that email in GameNest; if the real mailbox
+    owner later signs in with a different Google account, they get `409 account_linked_to_another_google_account`
+    and an administrator has to resolve it.
 
 ## License
 

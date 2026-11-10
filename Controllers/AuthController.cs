@@ -2,6 +2,7 @@ using GameNest_BackEnd.Data;
 using GameNest_BackEnd.DTOs.Auth;
 using GameNest_BackEnd.Models;
 using GameNest_BackEnd.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
@@ -158,6 +159,8 @@ public class AuthController(GameNestDbContext context, IEmailSender emailSender,
         {
             { Outcome: GoogleSignInOutcome.EmailNotConfirmed } => Conflict(new { code = "email_registered_unconfirmed" }),
             { Outcome: GoogleSignInOutcome.IdentityConflict } => Conflict(new { code = "account_linked_to_another_google_account" }),
+            { Outcome: GoogleSignInOutcome.LinkRequired } => Conflict(new { code = "account_link_required" }),
+            { Outcome: GoogleSignInOutcome.AmbiguousEmail } => Conflict(new { code = "duplicate_accounts_for_email" }),
             { User: { } user } => Ok(new
             {
                 token = CreateToken(user),
@@ -165,6 +168,41 @@ public class AuthController(GameNestDbContext context, IEmailSender emailSender,
                 user = new { user.Id, user.Username, user.Email, user.Role, user.AvatarUrl }
             }),
             _ => StatusCode(StatusCodes.Status503ServiceUnavailable, new { code = "google_sign_in_busy" })
+        };
+    }
+
+    /// <summary>
+    /// Links a Google account to the signed-in user (recovery path for <c>account_link_required</c>). Requires the
+    /// GameNest JWT, the account password and a Google ID token. Does not change role, password or email.
+    /// </summary>
+    [Authorize, HttpPost("google/link"), EnableRateLimiting(AuthRateLimiting.AuthPolicy)]
+    public async Task<IActionResult> LinkGoogle(GoogleLinkDto dto, [FromServices] IGoogleTokenValidator googleTokenValidator, [FromServices] GoogleSignInService googleSignIn)
+    {
+        if (!int.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId)) return Unauthorized();
+
+        GoogleIdentity identity;
+        try
+        {
+            identity = await googleTokenValidator.ValidateAsync(dto.IdToken, HttpContext.RequestAborted);
+        }
+        catch (GoogleTokenRejectedException ex)
+        {
+            return Unauthorized(new { code = ex.Code });
+        }
+        catch (GoogleAuthUnavailableException ex)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { code = ex.Code });
+        }
+
+        return await googleSignIn.LinkAsync(userId, dto.Password, identity, HttpContext.RequestAborted) switch
+        {
+            GoogleLinkOutcome.Linked => Ok(new { code = "google_account_linked" }),
+            GoogleLinkOutcome.AlreadyLinked => Ok(new { code = "google_account_already_linked" }),
+            GoogleLinkOutcome.InvalidPassword => Unauthorized(new { code = "invalid_credentials" }),
+            GoogleLinkOutcome.NoPassword => Conflict(new { code = "account_has_no_password" }),
+            GoogleLinkOutcome.UserHasOtherGoogleAccount => Conflict(new { code = "account_linked_to_another_google_account" }),
+            GoogleLinkOutcome.GoogleAccountLinkedToOtherUser => Conflict(new { code = "google_account_linked_to_another_user" }),
+            _ => Unauthorized()
         };
     }
 
