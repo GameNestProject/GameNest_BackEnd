@@ -20,6 +20,7 @@ public class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
     public const string JwtKey = "test-signing-key-that-is-long-enough-for-hmac-sha256";
     public const string JwtIssuer = "GameNest.Tests";
     public const string JwtAudience = "GameNest.Tests";
+    public const string AllowedOrigin = "https://frontend.example";
 
     private readonly SqliteConnection _connection = new("Data Source=:memory:");
 
@@ -34,6 +35,7 @@ public class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
         Environment.SetEnvironmentVariable("Jwt__Issuer", JwtIssuer);
         Environment.SetEnvironmentVariable("Jwt__Audience", JwtAudience);
         Environment.SetEnvironmentVariable("ConnectionStrings__DefaultConnection", "unused");
+        Environment.SetEnvironmentVariable("CORS_ALLOWED_ORIGINS", AllowedOrigin);
     }
 
     protected virtual IDictionary<string, string?> ExtraConfiguration => new Dictionary<string, string?>
@@ -52,7 +54,8 @@ public class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
                 ["Jwt:Key"] = JwtKey,
                 ["Jwt:Issuer"] = JwtIssuer,
                 ["Jwt:Audience"] = JwtAudience,
-                ["ConnectionStrings:DefaultConnection"] = "unused"
+                ["ConnectionStrings:DefaultConnection"] = "unused",
+                ["CORS_ALLOWED_ORIGINS"] = AllowedOrigin
             });
             c.AddInMemoryCollection(ExtraConfiguration);
         });

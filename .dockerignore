@@ -1,0 +1,43 @@
+# Version control
+.git
+.gitignore
+.gitattributes
+.github
+
+# Build output
+**/bin
+**/obj
+**/out
+**/publish
+
+# IDE / editor
+.vs
+.vscode
+.idea
+*.user
+*.suo
+*.swp
+
+# Local configuration and secrets
+.env
+.env.*
+**/secrets.json
+**/*.pfx
+**/*.pem
+**/*.key
+appsettings.Development.json
+appsettings.*.local.json
+Properties/launchSettings.json
+
+# Not needed in the image
+Tests
+TestResults
+**/*.trx
+coverage*.xml
+*.coverage
+scripts
+*.http
+README.md
+LICENSE
+Dockerfile
+.dockerignore

@@ -28,7 +28,19 @@ var jwtIssuer = RequireSetting(builder.Configuration, "Jwt:Issuer");
 var jwtAudience = RequireSetting(builder.Configuration, "Jwt:Audience");
 var connectionString = RequireSetting(builder.Configuration, "ConnectionStrings:DefaultConnection");
 
+// Hosting platforms such as Render provide the port to listen on in the PORT environment variable.
+// Bind to all interfaces on that port unless explicit URLs were configured (ASPNETCORE_URLS, launch profile).
+// Without PORT, the defaults apply (launchSettings.json locally, ASPNETCORE_HTTP_PORTS=8080 in the Docker image).
+var platformPort = builder.Configuration["PORT"];
+if (!string.IsNullOrWhiteSpace(platformPort) && string.IsNullOrWhiteSpace(builder.Configuration["urls"]))
+{
+    if (!int.TryParse(platformPort, out var port) || port is < 1 or > 65535)
+        throw new InvalidOperationException($"PORT must be a number between 1 and 65535, got '{platformPort}'.");
+    builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
+}
+
 builder.Services.AddControllers();
+builder.Services.AddFrontendCors(builder.Configuration, builder.Environment);
 builder.Services.AddEmailSender(builder.Configuration);
 builder.Services.AddAuthRateLimiting(builder.Configuration);
 
@@ -104,6 +116,11 @@ if (app.Environment.IsDevelopment())
 
 // HTTPS поки не чіпаємо
 // app.UseHttpsRedirection();
+
+// CORS runs before rate limiting and authentication: preflight (OPTIONS) requests are answered here
+// without a token and without consuming rate-limit permits, and 401/429 responses still carry
+// the CORS headers so the browser frontend can read them.
+app.UseCors(FrontendCors.PolicyName);
 
 app.UseRateLimiter();
 
