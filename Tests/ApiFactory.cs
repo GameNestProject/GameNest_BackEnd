@@ -36,7 +36,13 @@ public class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
         Environment.SetEnvironmentVariable("Jwt__Audience", JwtAudience);
         Environment.SetEnvironmentVariable("ConnectionStrings__DefaultConnection", "unused");
         Environment.SetEnvironmentVariable("CORS_ALLOWED_ORIGINS", AllowedOrigin);
+        Environment.SetEnvironmentVariable("Google__ClientId", GoogleClientId);
     }
+
+    public const string GoogleClientId = "gamenest-tests.apps.googleusercontent.com";
+
+    /// <summary>False: the Auth switches come only from appsettings.json (the production defaults).</summary>
+    protected virtual bool EnablePasswordAuth => true;
 
     protected virtual IDictionary<string, string?> ExtraConfiguration => new Dictionary<string, string?>
     {
@@ -55,8 +61,16 @@ public class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
                 ["Jwt:Issuer"] = JwtIssuer,
                 ["Jwt:Audience"] = JwtAudience,
                 ["ConnectionStrings:DefaultConnection"] = "unused",
-                ["CORS_ALLOWED_ORIGINS"] = AllowedOrigin
+                ["CORS_ALLOWED_ORIGINS"] = AllowedOrigin,
+                ["Google:ClientId"] = GoogleClientId
             });
+            // The existing email/password tests need the flow enabled; Google-only mode has its own tests.
+            if (EnablePasswordAuth)
+                c.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Auth:PasswordRegistrationEnabled"] = "true",
+                    ["Auth:PasswordLoginEnabled"] = "true"
+                });
             c.AddInMemoryCollection(ExtraConfiguration);
         });
         builder.ConfigureServices(services =>

@@ -8,7 +8,11 @@ public class User
 
     public string Email { get; set; } = string.Empty;
 
-    public string PasswordHash { get; set; } = string.Empty;
+    /// <summary>BCrypt hash of the password; null for accounts that sign in only with an external provider (Google).</summary>
+    public string? PasswordHash { get; set; }
+
+    /// <summary>Profile picture URL taken from the external provider at sign-up; may be null.</summary>
+    public string? AvatarUrl { get; set; }
 
     public string Role { get; set; } = "User";
 
@@ -23,4 +27,5 @@ public class User
 
     public ICollection<GameSubmission> GameSubmissions { get; set; } = new List<GameSubmission>();
     public ICollection<UserCreatedGame> UserCreatedGames { get; set; } = new List<UserCreatedGame>();
+    public ICollection<ExternalLogin> ExternalLogins { get; set; } = new List<ExternalLogin>();
 }

@@ -33,14 +33,14 @@ public static class TestHelpers
 
     public static string UniqueSuffix() => Guid.NewGuid().ToString("N")[..8];
 
-    public static async Task<User> SeedUserAsync(this ApiFactory factory, string role = "User", string password = "seeded-password-1", bool emailConfirmed = true)
+    public static async Task<User> SeedUserAsync(this ApiFactory factory, string role = "User", string password = "seeded-password-1", bool emailConfirmed = true, string? email = null)
     {
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<GameNestDbContext>();
         var s = UniqueSuffix();
         var user = new User
         {
-            Username = role.ToLowerInvariant() + s, Email = $"{role.ToLowerInvariant()}{s}@test.local",
+            Username = role.ToLowerInvariant() + s, Email = email ?? $"{role.ToLowerInvariant()}{s}@test.local",
             PasswordHash = BCrypt.Net.BCrypt.HashPassword(password), Role = role, EmailConfirmed = emailConfirmed
         };
         db.Users.Add(user);
