@@ -16,5 +16,12 @@ obj/
 # User Secrets
 secrets.json
 
-# Tests
-Tests/
+# Test results
+TestResults/
+*.trx
+coverage*.xml
+*.coverage
+
+# IDE
+.idea/
+.vscode/

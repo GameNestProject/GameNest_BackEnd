@@ -12,8 +12,8 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace GameNest_BackEnd.Migrations
 {
     [DbContext(typeof(GameNestDbContext))]
-    [Migration("20261109133806_InitialCreate")]
-    partial class InitialCreate
+    [Migration("20261104121253_AddP1ApiFeatures")]
+    partial class AddP1ApiFeatures
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -139,12 +139,7 @@ namespace GameNest_BackEnd.Migrations
 
                     b.HasIndex("SubmittedByUserId");
 
-                    b.ToTable("GameSubmissions", t =>
-                        {
-                            t.HasCheckConstraint("CK_GameSubmissions_Status", "\"Status\" IN ('Pending', 'Approved', 'Rejected')");
-
-                            t.HasCheckConstraint("CK_GameSubmissions_Type", "\"Type\" IN ('NewGame', 'Correction')");
-                        });
+                    b.ToTable("GameSubmissions");
                 });
 
             modelBuilder.Entity("GameNest_BackEnd.Models.GameTitle", b =>
@@ -286,10 +281,7 @@ namespace GameNest_BackEnd.Migrations
                     b.HasIndex("UserId", "GameId")
                         .IsUnique();
 
-                    b.ToTable("UserGames", t =>
-                        {
-                            t.HasCheckConstraint("CK_UserGames_Status", "\"Status\" IN ('Planned', 'Playing', 'Completed', 'Dropped', 'OnHold')");
-                        });
+                    b.ToTable("UserGames");
                 });
 
             modelBuilder.Entity("GameNest_BackEnd.Models.Game", b =>
@@ -343,7 +335,7 @@ namespace GameNest_BackEnd.Migrations
                     b.HasOne("GameNest_BackEnd.Models.Game", "Game")
                         .WithMany("UserGames")
                         .HasForeignKey("GameId")
-                        .OnDelete(DeleteBehavior.Restrict)
+                        .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
                     b.HasOne("GameNest_BackEnd.Models.User", "User")
