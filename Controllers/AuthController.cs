@@ -5,6 +5,7 @@ using GameNest_BackEnd.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
@@ -15,8 +16,13 @@ namespace GameNest_BackEnd.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-public class AuthController(GameNestDbContext context, IEmailSender emailSender, IConfiguration configuration, ILogger<AuthController> logger) : ControllerBase
+public class AuthController(GameNestDbContext context, IEmailSender emailSender, IConfiguration configuration, ILogger<AuthController> logger,
+    IOptions<AuthFeatureOptions> authFeatures) : ControllerBase
 {
+    // Email/password registration and login can be switched off (Google-only MVP) without removing them.
+    private IActionResult PasswordRegistrationDisabled() => StatusCode(StatusCodes.Status403Forbidden, new { code = "password_registration_disabled" });
+    private IActionResult PasswordLoginDisabled() => StatusCode(StatusCodes.Status403Forbidden, new { code = "password_login_disabled" });
+
     private static readonly TimeSpan ConfirmationTokenLifetime = TimeSpan.FromHours(24);
 
     // Hash of a random secret nobody knows, created once per process with the same work factor as real
@@ -37,6 +43,7 @@ public class AuthController(GameNestDbContext context, IEmailSender emailSender,
     [HttpPost("register"), EnableRateLimiting(AuthRateLimiting.AuthPolicy)]
     public async Task<IActionResult> Register(RegisterDto dto)
     {
+        if (!authFeatures.Value.PasswordRegistrationEnabled) return PasswordRegistrationDisabled();
         var username = dto.Username.Trim();
         var email = NormalizeEmail(dto.Email);
         if (await context.Users.AnyAsync(u => u.Username == username || u.Email == email, HttpContext.RequestAborted))
@@ -76,6 +83,7 @@ public class AuthController(GameNestDbContext context, IEmailSender emailSender,
     [HttpPost("resend-confirmation"), EnableRateLimiting(AuthRateLimiting.ResendConfirmationPolicy)]
     public async Task<IActionResult> ResendConfirmation(ResendConfirmationDto dto)
     {
+        if (!authFeatures.Value.PasswordRegistrationEnabled) return PasswordRegistrationDisabled();
         var email = NormalizeEmail(dto.Email);
         var user = await context.Users.SingleOrDefaultAsync(u => u.Email == email, HttpContext.RequestAborted);
         if (user is { EmailConfirmed: false })
@@ -114,6 +122,7 @@ public class AuthController(GameNestDbContext context, IEmailSender emailSender,
     [HttpPost("login"), EnableRateLimiting(AuthRateLimiting.AuthPolicy)]
     public async Task<IActionResult> Login(LoginDto dto)
     {
+        if (!authFeatures.Value.PasswordLoginEnabled) return PasswordLoginDisabled();
         var email = NormalizeEmail(dto.Email);
         var user = await context.Users.SingleOrDefaultAsync(u => u.Email == email, HttpContext.RequestAborted);
         // Always run one BCrypt verification so that unknown emails take as long as wrong passwords.
@@ -121,6 +130,42 @@ public class AuthController(GameNestDbContext context, IEmailSender emailSender,
         if (user is null || !passwordValid) return Unauthorized(new { code = "invalid_credentials" });
         if (!user.EmailConfirmed) return Unauthorized(new { code = "email_not_confirmed" });
         return Ok(new { token = CreateToken(user) });
+    }
+
+    /// <summary>
+    /// Sign-up and sign-in with a Google ID token (Google Identity Services <c>credential</c>). The token is verified
+    /// server-side; email, name and picture are taken only from the verified token. Returns a GameNest JWT.
+    /// </summary>
+    [HttpPost("google"), EnableRateLimiting(AuthRateLimiting.AuthPolicy)]
+    public async Task<IActionResult> Google(GoogleLoginDto dto, [FromServices] IGoogleTokenValidator googleTokenValidator, [FromServices] GoogleSignInService googleSignIn)
+    {
+        GoogleIdentity identity;
+        try
+        {
+            identity = await googleTokenValidator.ValidateAsync(dto.IdToken, HttpContext.RequestAborted);
+        }
+        catch (GoogleTokenRejectedException ex)
+        {
+            return Unauthorized(new { code = ex.Code });
+        }
+        catch (GoogleAuthUnavailableException ex)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { code = ex.Code });
+        }
+
+        var result = await googleSignIn.SignInAsync(identity, HttpContext.RequestAborted);
+        return result switch
+        {
+            { Outcome: GoogleSignInOutcome.EmailNotConfirmed } => Conflict(new { code = "email_registered_unconfirmed" }),
+            { Outcome: GoogleSignInOutcome.IdentityConflict } => Conflict(new { code = "account_linked_to_another_google_account" }),
+            { User: { } user } => Ok(new
+            {
+                token = CreateToken(user),
+                isNewUser = result.Outcome == GoogleSignInOutcome.Created,
+                user = new { user.Id, user.Username, user.Email, user.Role, user.AvatarUrl }
+            }),
+            _ => StatusCode(StatusCodes.Status503ServiceUnavailable, new { code = "google_sign_in_busy" })
+        };
     }
 
     private static bool TokenMatches(string? storedTokenHash, string token)

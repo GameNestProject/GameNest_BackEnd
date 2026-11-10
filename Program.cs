@@ -37,6 +37,15 @@ var jwtIssuer = RequireSetting(builder.Configuration, "Jwt:Issuer");
 var jwtAudience = RequireSetting(builder.Configuration, "Jwt:Audience");
 var connectionString = RequireSetting(builder.Configuration, "ConnectionStrings:DefaultConnection");
 
+// Google sign-in is the public way to register and log in, so its client ID is required outside Development.
+var googleClientId = builder.Configuration["Google:ClientId"];
+if (!string.IsNullOrWhiteSpace(googleClientId) || !builder.Environment.IsDevelopment())
+{
+    if (!GoogleAuthOptions.IsValidClientId(googleClientId))
+        throw new InvalidOperationException(
+            $"Google:ClientId (environment variable Google__ClientId) must be set to an OAuth Web client ID ending with '{GoogleAuthOptions.ClientIdSuffix}'.");
+}
+
 // Hosting platforms such as Render provide the port to listen on in the PORT environment variable.
 // Bind to all interfaces on that port unless explicit URLs were configured (ASPNETCORE_URLS, launch profile).
 // Without PORT, the defaults apply (launchSettings.json locally, ASPNETCORE_HTTP_PORTS=8080 in the Docker image).
@@ -51,6 +60,11 @@ if (!string.IsNullOrWhiteSpace(platformPort) && string.IsNullOrWhiteSpace(builde
 builder.Services.AddControllers();
 builder.Services.AddFrontendCors(builder.Configuration, builder.Environment);
 builder.Services.AddEmailSender(builder.Configuration);
+builder.Services.Configure<AuthFeatureOptions>(builder.Configuration.GetSection(AuthFeatureOptions.SectionName));
+builder.Services.Configure<GoogleAuthOptions>(builder.Configuration.GetSection(GoogleAuthOptions.SectionName));
+builder.Services.AddSingleton<IGoogleTokenValidator>(sp => new GoogleTokenValidator(
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<GoogleAuthOptions>>(), sp.GetRequiredService<ILogger<GoogleTokenValidator>>()));
+builder.Services.AddScoped<GoogleSignInService>();
 builder.Services.AddAuthRateLimiting(builder.Configuration);
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -116,7 +130,9 @@ builder.Services.AddSwaggerGen(options =>
 
 var app = builder.Build();
 
-if (!app.Environment.IsDevelopment() && !EmailServiceCollectionExtensions.IsResendConfigured(app.Configuration))
+if (!app.Environment.IsDevelopment()
+    && app.Configuration.GetValue<bool>($"{AuthFeatureOptions.SectionName}:{nameof(AuthFeatureOptions.PasswordRegistrationEnabled)}")
+    && !EmailServiceCollectionExtensions.IsResendConfigured(app.Configuration))
     app.Logger.LogWarning("No email provider is configured (Resend__ApiKey, Resend__FromEmail, Email__ConfirmationUrlBase): registration will return 503 until it is.");
 
 // Swagger тільки в режимі розробки
