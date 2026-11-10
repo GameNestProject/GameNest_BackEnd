@@ -22,6 +22,7 @@ REST API for **GameNest** — a web application for browsing a video game catalo
 - C# / ASP.NET Core Web API on **.NET 10**
 - **PostgreSQL** via Entity Framework Core 10 + Npgsql
 - JWT Bearer authentication, BCrypt.Net-Next
+- Resend REST API for transactional email (plain `HttpClient`, no SDK)
 - Swagger / OpenAPI (Swashbuckle)
 - xUnit integration tests (in-memory SQLite)
 - Docker (multi-stage build) for deployment
@@ -35,7 +36,8 @@ GameNest_BackEnd/
 ├── DTOs/                 # Request/response models and validation
 ├── Migrations/           # EF Core migrations (do not edit or delete)
 ├── Models/               # Entities
-├── Services/             # Email senders, rate limiting, CORS
+├── Cli/                  # Operator command: admin promote
+├── Services/             # Email senders (Resend, development), rate limiting, CORS
 ├── Properties/           # launchSettings.json (local profiles)
 ├── scripts/              # One-time operational SQL scripts
 ├── Tests/                # xUnit tests (not part of the API build)
@@ -111,7 +113,11 @@ or invalid (it never falls back to a built-in key or connection string).
 | `Jwt__Issuer` | yes* | no | Defaults to `GameNestAPI` from `appsettings.json` |
 | `Jwt__Audience` | yes* | no | Defaults to `GameNestClients` from `appsettings.json` |
 | `CORS_ALLOWED_ORIGINS` | yes outside Development | no | Comma-separated allowed origins, e.g. `https://gamenest.pp.ua` |
-| `Email__ConfirmationUrlBase` | no | no | Frontend confirmation page; `email` and `token` query parameters are appended |
+| `Email__ConfirmationUrlBase` | with Resend | no | Frontend confirmation page; `email` and `token` query parameters are appended |
+| `Resend__ApiKey` | for email delivery | **yes** | Resend API key (sending access). All three `Resend__*` settings or none |
+| `Resend__FromEmail` | for email delivery | no | Sender address on the domain verified in Resend, e.g. `no-reply@gamenest.pp.ua` |
+| `Resend__FromName` | no | no | Sender display name, default `GameNest` |
+| `Resend__TimeoutSeconds` | no | no | Timeout of a Resend request, default `15` |
 | `PORT` | no | no | Port to listen on (all interfaces). Set automatically by Render |
 | `RateLimiting__Auth__PermitLimit` / `__WindowSeconds` | no | no | Default `10` / `60`: register, login, confirm-email |
 | `RateLimiting__ResendConfirmation__PermitLimit` / `__WindowSeconds` | no | no | Default `5` / `900` |
@@ -180,7 +186,13 @@ Then open `http://localhost:8080/api/health`. Swagger is not available in the co
 | `Jwt__Issuer` | `GameNestAPI` (optional: same as the default) |
 | `Jwt__Audience` | `GameNestClients` (optional: same as the default) |
 | `CORS_ALLOWED_ORIGINS` | `https://gamenest.pp.ua` |
-| `Email__ConfirmationUrlBase` | `https://gamenest.pp.ua/confirm-email` (optional, effective only once an email provider exists; check the frontend route) |
+| `Email__ConfirmationUrlBase` | `https://gamenest.pp.ua/confirm-email` (required with Resend) |
+| `Resend__ApiKey` | Resend API key, sending access — **secret** |
+| `Resend__FromEmail` | `no-reply@gamenest.pp.ua` (on the verified domain) |
+| `Resend__FromName` | `GameNest` |
+
+Without the `Resend__*` variables the API still starts, but registration returns `503`.
+`ConnectionStrings__DefaultConnection` is needed by the service itself; the admin command is run locally and needs nothing extra in Render.
 
 Do **not** set `PORT` — Render provides it.
 
@@ -260,40 +272,175 @@ Back up (or create a Neon branch of) the production database before applying mig
 It requires no authentication, returns no internal data and does not touch the database, so it reports that the
 process is up, not that PostgreSQL is reachable.
 
-## Email Confirmation
+## Email Confirmation and Resend
 
 New accounts must confirm their email address before they can log in. Confirmation tokens are random,
 stored only as SHA-256 hashes, valid for 24 hours and single-use.
 
-**No email provider (SMTP or email API) is integrated yet.** The code has an `IEmailSender` abstraction with two implementations:
+### How emails are sent
 
-- **Development** — `DevelopmentEmailSender` writes the confirmation link to the console log
-  (`[Development email] Confirmation link for ...`); confirm in the frontend or via `POST /api/Auth/confirm-email`.
-- **Every other environment** — `UnavailableEmailSender` always fails, so registration returns
-  `503 email_service_unavailable` and the account is **not** created. It never pretends an email was sent.
+All emails go through the `IEmailSender` abstraction. The implementation is chosen at startup
+(`Services/EmailServiceCollectionExtensions.cs`):
 
-`POST /api/Auth/resend-confirmation` always returns `202` with the same body, so it does not reveal whether an email is registered.
+| Configuration | Sender | Behaviour |
+|---|---|---|
+| All `Resend__*` settings and `Email__ConfirmationUrlBase` set (any environment) | `ResendEmailSender` | Sends a real email through the Resend REST API |
+| No `Resend__*` settings, `Development` | `DevelopmentEmailSender` | Writes the confirmation link to the console log |
+| No `Resend__*` settings, any other environment | `UnavailableEmailSender` | Registration returns `503 email_service_unavailable`; a warning is logged at startup |
+| Some `Resend__*` settings, or Resend without a valid `Email__ConfirmationUrlBase` | — | The application **refuses to start** and names the missing setting |
 
-To enable registration in production, a real `IEmailSender` implementation (for example an HTTP email API provider)
-must be added and registered in `Services/EmailServiceCollectionExtensions.cs`, together with its configuration
-(API key as a secret environment variable, sender address, `Email__ConfirmationUrlBase`).
+`ResendEmailSender` calls `POST https://api.resend.com/emails` with `HttpClient` (no SDK, no SMTP):
+
+- headers `Authorization: Bearer <key>` and `User-Agent: GameNest-Backend/1.0` (Resend rejects requests without a User-Agent);
+- body with `from` (`<FromName> <FromEmail>`), `to`, `subject`, and both an HTML and a plain-text part (in Ukrainian);
+- success only for a 2xx response. HTTP errors, network failures and timeouts (`Resend__TimeoutSeconds`, default 15)
+  raise `EmailDeliveryException`; a cancelled request (client disconnected) is not reported as a delivery failure;
+- logs contain the HTTP status, Resend's error name and a sanitized message (recipient, token, link and key removed) —
+  never the API key, the confirmation token, the link or the recipient address.
+
+### Confirmation link
+
+The link is `Email__ConfirmationUrlBase` plus `?email=<url-encoded email>&token=<url-encoded token>`
+(query parameters already present in the base URL are kept). Production example:
+
+```text
+https://gamenest.pp.ua/confirm-email?email=user%40example.com&token=...
+```
+
+The frontend page must read `email` and `token` from the query string and send them unchanged to
+`POST /api/Auth/confirm-email` with the JSON body `{"email": "...", "token": "..."}`.
+
+> **Frontend status (checked 2026-11-10):** the current `GameNest_FrontEnd` does not call this API yet (it keeps its data
+> in `localStorage`) and has no `/confirm-email` page. Until that page exists, links in the emails lead nowhere.
+> Cloudflare must also serve that path (a `confirm-email` page or a single-page-app fallback).
+
+### Behaviour of the endpoints
+
+- `POST /api/Auth/register` → `201` only after Resend accepted the email. If sending fails, the new account is deleted
+  again and the API returns `503 email_service_unavailable`; the same email/username can register again later.
+  Unique indexes on email and username prevent duplicates.
+- `POST /api/Auth/resend-confirmation` → always `202` with the same body (does not reveal whether an email is registered).
+  A new token is stored only if the email was sent; otherwise the previous link stays valid.
+- `POST /api/Auth/confirm-email` → `200 email_confirmed`, or `400 invalid_or_expired_confirmation_token`.
+- An email address is never marked as confirmed because of a send attempt.
+
+Edge case: if Resend accepts the email but its response is lost (timeout), the account is removed and the delivered
+link then fails with `400`; the user simply registers again.
+
+### Setting up Resend (manual steps)
+
+1. **Account:** sign up at <https://resend.com>. Check the current free-plan quotas (daily and monthly) in the dashboard.
+2. **Domain:** Resend → **Domains** → **Add Domain** → `gamenest.pp.ua` (pick a region close to the users, e.g. EU).
+   Resend then shows the DNS records to create — typically:
+   - a `TXT` record `resend._domainkey` with the DKIM public key;
+   - an `MX` record and a `TXT` SPF record (`v=spf1 include:... ~all`) on the `send` subdomain (bounce handling);
+   - optionally a `TXT` record `_dmarc`, e.g. `v=DMARC1; p=none;`.
+
+   Always copy the exact names and values from the Resend dashboard; they are specific to the domain and region.
+3. **Cloudflare DNS** (dashboard → `gamenest.pp.ua` → **DNS** → **Records** → **Add record**), for each record from Resend:
+   - the same type (`TXT` / `MX`), the name without the zone (e.g. `resend._domainkey`, `send`), the value pasted exactly,
+     and the MX priority shown by Resend;
+   - proxy status **DNS only** (TXT/MX records are never proxied);
+   - these names (`send`, `resend._domainkey`) do not affect existing records of the root domain. If an SPF record already
+     exists on the same name, merge the values into one record instead of adding a second one.
+
+   Back in Resend, click **Verify DNS Records** and wait until the domain is **Verified** (propagation can take a while).
+4. **API key:** Resend → **API Keys** → **Create API Key**, permission **Sending access**, restricted to `gamenest.pp.ua`.
+   The key is shown once: paste it straight into the Render Dashboard as `Resend__ApiKey`. Never store it in files,
+   the repository, chats or issues; revoke and replace it if it is ever exposed.
+5. **Sender:** `Resend__FromEmail=no-reply@gamenest.pp.ua` and `Resend__FromName=GameNest` → emails come from
+   `GameNest <no-reply@gamenest.pp.ua>`. The address must belong to the verified domain.
+
+Until the domain is verified, Resend only allows test sends to your own account address; registering other users then
+fails with `503` (Resend answers `403 validation_error`).
+
+### Testing Resend locally (optional)
+
+Put the settings into User Secrets (never into `appsettings*.json`) and register through Swagger:
+
+```powershell
+dotnet user-secrets set "Resend:ApiKey" "<key>"
+dotnet user-secrets set "Resend:FromEmail" "no-reply@gamenest.pp.ua"
+```
+
+`Email:ConfirmationUrlBase` already comes from `appsettings.Development.json`. Remove the secrets again
+(`dotnet user-secrets remove "Resend:ApiKey"`, …) to return to the console sender.
+The automated tests never contact Resend: they use a fake `HttpMessageHandler`.
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| Startup fails: `Resend email configuration is incomplete or invalid: ...` | Only some `Resend__*` settings are set, `Resend__FromEmail` is not a plain address, or `Email__ConfirmationUrlBase` is missing / not an absolute URL |
+| Startup warning `No email provider is configured`, register → `503` | No `Resend__*` settings outside Development |
+| Register → `503`, log `Resend rejected ... HTTP 401` | Invalid, deleted or inactive API key |
+| Register → `503`, log `HTTP 403 ... validation_error` | Domain not verified, `FromEmail` not on the verified domain, or test-mode restrictions |
+| Register → `503`, log `HTTP 429` | Rate limit or daily/monthly quota exceeded |
+| Register → `503`, log `Resend is unreachable` / `did not respond within` | Network/DNS problem or Resend outage; retry later |
+| Link opens a 404 page | The frontend `/confirm-email` page does not exist yet |
+| `400 invalid_or_expired_confirmation_token` | Link older than 24 h, already used, replaced by a newer resend, or altered |
 
 ## First Administrator
 
-There is no API to assign roles. The first administrator is created once, directly in the database:
+There is no HTTP endpoint to assign roles, and users cannot change their own role. The first administrator is
+promoted once with a local command built into the application:
 
-1. Register the future administrator through the API and confirm the email address.
-2. Edit `scripts/bootstrap-first-admin.sql` locally and replace the placeholder email (do not commit that change).
-3. Run it against the target database:
+```text
+dotnet run --no-launch-profile -- admin promote --email <email> [--additional]
+```
+
+How it works:
+
+- it runs **instead of** the web server and needs only `ConnectionStrings__DefaultConnection` (no JWT, CORS or Resend settings);
+- `--no-launch-profile` keeps the default `Production` environment, so User Secrets are **not** loaded and the database
+  is exactly the one from the environment variable;
+- the user is looked up by the exact (normalized) email address. Arguments are parsed strictly: unknown arguments,
+  several emails, `Name <email>` forms and wildcards are rejected;
+- it refuses (and changes nothing) if the user does not exist, the email is not confirmed, or another administrator
+  already exists (`--additional` deliberately allows a further administrator);
+- it shows the database host/name and the user's id, username, email and role, and asks you to **type the username** to confirm;
+- it changes only the `Role` column from `User` to `Admin`, in a transaction (password and other data untouched);
+- running it again for a user who is already an administrator is a harmless no-op.
+
+Exit codes: `0` success / already admin, `1` invalid arguments, `2` user not found, `3` email not confirmed,
+`4` confirmation did not match, `5` an administrator already exists, `6` missing/invalid connection string, `7` database error.
+
+### Step by step (production, Neon)
+
+1. Register the future administrator through the frontend (or `POST /api/Auth/register`).
+2. Open the link from the email to confirm the address.
+3. On your computer, from the repository root (PowerShell):
 
    ```powershell
-   psql "<connection string>" -v ON_ERROR_STOP=1 -f scripts/bootstrap-first-admin.sql
+   Remove-Item Env:ASPNETCORE_ENVIRONMENT -ErrorAction SilentlyContinue
+   $env:ConnectionStrings__DefaultConnection = Read-Host "Neon connection string"
+
+   dotnet run --no-launch-profile -- admin promote --email admin@example.com
+
+   Remove-Item Env:ConnectionStrings__DefaultConnection
    ```
 
-4. The user must log in again to receive a token with the `Admin` role.
+   Example session:
 
-The script runs in a transaction and aborts if an administrator already exists, the placeholder was not replaced,
-the email does not match exactly one user, or that user's email is not confirmed.
+   ```text
+   About to grant the Admin role:
+     database : host=ep-xxxx.eu-central-1.aws.neon.tech, port=5432, database=neondb, user=neondb_owner
+     user id  : 1
+     username : admin_user
+     email    : admin@example.com
+     role     : User -> Admin
+   Type the username 'admin_user' to confirm (anything else aborts): admin_user
+   Done: user 'admin_user' (admin@example.com, id 1) is now an administrator.
+   Existing tokens keep the old role until they expire (up to 1 hour): the user must log in again.
+   ```
+
+4. The user logs in again to receive a token with the `Admin` role.
+
+No bootstrap password or admin credentials exist anywhere: the administrator keeps the password they registered with.
+Do not add anything to Render for this — the command is run locally only.
+
+`scripts/bootstrap-first-admin.sql` remains as an equivalent manual alternative
+(`psql "<connection string>" -v ON_ERROR_STOP=1 -f scripts/bootstrap-first-admin.sql` after replacing the placeholder email locally).
 
 ## Security
 
@@ -301,23 +448,28 @@ the email does not match exactly one user, or that user's email is not confirmed
 - Login responses and timing are the same for unknown emails and wrong passwords.
 - Tokens are HS256-signed, valid for one hour, and must contain a valid user id; detailed token errors are shown only in Development.
 - Authentication endpoints are rate limited per client IP and endpoint (`429` with `Retry-After`).
+- Roles can only be changed with direct database access (the admin command or SQL script), never through the API.
 - Swagger UI and OpenAPI JSON are available only in Development.
 - HTTPS redirection is not enabled in the application; TLS is terminated by Render / Cloudflare.
-- Secrets must never be committed. Any secret that has ever been committed must be considered compromised and rotated.
+- Secrets (database password, JWT key, Resend API key) must never be committed. Any secret that has ever been
+  committed must be considered compromised and rotated.
 
 ## Known Production Limitations
 
-1. **Registration does not work in production** until an email provider is integrated (`503 email_service_unavailable`).
-   Consequently no user can log in on a fresh database, the first administrator cannot be created, and the catalog
-   (which has no seed data) stays empty.
-2. **Rate limiting behind Render's proxy**: the limiter uses the direct connection IP. Forwarded headers are not trusted,
+1. **The frontend is not connected to the API yet** and has no `/confirm-email` page, so confirmation links cannot be
+   completed in the browser until the frontend implements that page (see "Confirmation link").
+   Without confirmed users nobody can log in, the first administrator cannot be promoted, and the catalog stays empty
+   (there is no seed data). Workaround for testing: send `email` and `token` from the link to `POST /api/Auth/confirm-email` manually.
+2. **Email delivery depends on Resend:** the domain must be verified and all `Resend__*` variables set; otherwise
+   registration returns `503`. The free plan has daily/monthly quotas.
+3. **Rate limiting behind Render's proxy**: the limiter uses the direct connection IP. Forwarded headers are not trusted,
    so on Render all clients may share the proxy's address and therefore one limit (10 auth requests per minute in total
    by default). Trusting `X-Forwarded-For` safely requires knowing the proxy chain; this is not configured yet.
-3. The rate limiter is in-memory and per instance; limits reset when the service restarts.
-4. **Render Free** spins the service down after inactivity; the first request afterwards can take up to about a minute.
+4. The rate limiter is in-memory and per instance; limits reset when the service restarts.
+5. **Render Free** spins the service down after inactivity; the first request afterwards can take up to about a minute.
    **Neon Free** suspends the compute when idle, which adds latency to the first database query.
-5. The health check does not verify database connectivity.
-6. Migrations must be applied manually (see above).
+6. The health check does not verify database connectivity.
+7. Migrations must be applied manually (see above).
 
 ## License
 

@@ -6,8 +6,17 @@ using System.Security.Claims;
 using System.Text;
 using Microsoft.OpenApi;
 using GameNest_BackEnd.Services;
+using GameNest_BackEnd.Cli;
 
-var builder = WebApplication.CreateBuilder(args);
+// Operator command (no web server): dotnet run --no-launch-profile -- admin promote --email <email>
+// Its arguments are not passed to the configuration system.
+var isAdminCommand = AdminCommand.IsAdminCommand(args);
+var builder = WebApplication.CreateBuilder(isAdminCommand ? [] : args);
+if (isAdminCommand)
+{
+    Environment.ExitCode = await AdminCommand.RunAsync(args, builder.Configuration, Console.In, Console.Out, Console.Error);
+    return;
+}
 
 // Secrets are never stored in appsettings.json: use User Secrets in Development
 // and environment variables (e.g. Jwt__Key, ConnectionStrings__DefaultConnection) in Production.
@@ -106,6 +115,9 @@ builder.Services.AddSwaggerGen(options =>
 });
 
 var app = builder.Build();
+
+if (!app.Environment.IsDevelopment() && !EmailServiceCollectionExtensions.IsResendConfigured(app.Configuration))
+    app.Logger.LogWarning("No email provider is configured (Resend__ApiKey, Resend__FromEmail, Email__ConfirmationUrlBase): registration will return 503 until it is.");
 
 // Swagger тільки в режимі розробки
 if (app.Environment.IsDevelopment())
