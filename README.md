@@ -7,7 +7,8 @@ REST API for **GameNest** — a web application for browsing a video game catalo
 
 ## Features
 
-- User registration with mandatory email confirmation, login, resending the confirmation
+- **Sign-up and sign-in with Google** (Google Identity Services ID token → GameNest JWT) — the public flow for the MVP
+- Email/password registration with mandatory email confirmation and login (kept, switched off by default in production)
 - Password hashing with BCrypt, JWT authentication (HS256, 1 hour)
 - Role-based authorization (`User` and `Admin`)
 - Game catalog, game titles and versions
@@ -22,6 +23,8 @@ REST API for **GameNest** — a web application for browsing a video game catalo
 - C# / ASP.NET Core Web API on **.NET 10**
 - **PostgreSQL** via Entity Framework Core 10 + Npgsql
 - JWT Bearer authentication, BCrypt.Net-Next
+- Resend REST API for transactional email (plain `HttpClient`, no SDK)
+- Google.Apis.Auth for verifying Google ID tokens
 - Swagger / OpenAPI (Swashbuckle)
 - xUnit integration tests (in-memory SQLite)
 - Docker (multi-stage build) for deployment
@@ -35,7 +38,8 @@ GameNest_BackEnd/
 ├── DTOs/                 # Request/response models and validation
 ├── Migrations/           # EF Core migrations (do not edit or delete)
 ├── Models/               # Entities
-├── Services/             # Email senders, rate limiting, CORS
+├── Cli/                  # Operator command: admin promote
+├── Services/             # Email senders (Resend, development), rate limiting, CORS
 ├── Properties/           # launchSettings.json (local profiles)
 ├── scripts/              # One-time operational SQL scripts
 ├── Tests/                # xUnit tests (not part of the API build)
@@ -111,7 +115,14 @@ or invalid (it never falls back to a built-in key or connection string).
 | `Jwt__Issuer` | yes* | no | Defaults to `GameNestAPI` from `appsettings.json` |
 | `Jwt__Audience` | yes* | no | Defaults to `GameNestClients` from `appsettings.json` |
 | `CORS_ALLOWED_ORIGINS` | yes outside Development | no | Comma-separated allowed origins, e.g. `https://gamenest.pp.ua` |
-| `Email__ConfirmationUrlBase` | no | no | Frontend confirmation page; `email` and `token` query parameters are appended |
+| `Email__ConfirmationUrlBase` | with Resend | no | Frontend confirmation page; `email` and `token` query parameters are appended |
+| `Resend__ApiKey` | for email delivery | **yes** | Resend API key (sending access). All three `Resend__*` settings or none |
+| `Resend__FromEmail` | for email delivery | no | Sender address on the domain verified in Resend, e.g. `no-reply@gamenest.pp.ua` |
+| `Resend__FromName` | no | no | Sender display name, default `GameNest` |
+| `Resend__TimeoutSeconds` | no | no | Timeout of a Resend request, default `15` |
+| `Google__ClientId` | yes outside Development | no | OAuth 2.0 **Web** client ID (`….apps.googleusercontent.com`). No client secret is needed |
+| `Auth__PasswordRegistrationEnabled` | no | no | `false` by default (`true` in `appsettings.Development.json`): register + resend-confirmation |
+| `Auth__PasswordLoginEnabled` | no | no | `false` by default (Google-only); set to `true` only temporarily to migrate existing accounts (see "Email/password flow and the transition to Google") |
 | `PORT` | no | no | Port to listen on (all interfaces). Set automatically by Render |
 | `RateLimiting__Auth__PermitLimit` / `__WindowSeconds` | no | no | Default `10` / `60`: register, login, confirm-email |
 | `RateLimiting__ResendConfirmation__PermitLimit` / `__WindowSeconds` | no | no | Default `5` / `900` |
@@ -180,7 +191,20 @@ Then open `http://localhost:8080/api/health`. Swagger is not available in the co
 | `Jwt__Issuer` | `GameNestAPI` (optional: same as the default) |
 | `Jwt__Audience` | `GameNestClients` (optional: same as the default) |
 | `CORS_ALLOWED_ORIGINS` | `https://gamenest.pp.ua` |
-| `Email__ConfirmationUrlBase` | `https://gamenest.pp.ua/confirm-email` (optional, effective only once an email provider exists; check the frontend route) |
+| `Google__ClientId` | `<id>.apps.googleusercontent.com` from Google Cloud Console (required) |
+
+Optional — only if email/password registration is switched back on (`Auth__PasswordRegistrationEnabled=true`):
+
+| Name | Value |
+|---|---|
+| `Email__ConfirmationUrlBase` | `https://gamenest.pp.ua/confirm-email` (required with Resend) |
+| `Resend__ApiKey` | Resend API key, sending access — **secret** |
+| `Resend__FromEmail` | `no-reply@gamenest.pp.ua` (on the verified domain) |
+| `Resend__FromName` | `GameNest` |
+
+Google-only sign-up does not need Resend. Without the `Resend__*` variables the API starts normally; only the
+(disabled by default) email/password registration would return `503`.
+`ConnectionStrings__DefaultConnection` is needed by the service itself; the admin command is run locally and needs nothing extra in Render.
 
 Do **not** set `PORT` — Render provides it.
 
@@ -211,7 +235,47 @@ Migrations are **not** applied automatically at startup: a migration should run 
 version starts, and never concurrently from several instances. Apply them manually when a release contains new migrations.
 
 Current migrations (oldest first): `InitialCreate`, `AddUsers`, `FinalizeMvpModels`, `AddP1ApiFeatures`,
-`AuditDataIntegrity`. A new, empty Neon database gets all of them.
+`AuditDataIntegrity`, `AddExternalLogins`, `AddUsersEmailLowerUniqueIndex`. A new, empty Neon database gets all of them.
+
+**Before applying migrations to a database that already has users**, run this read-only check (e.g. in the Neon
+SQL Editor). It must return no rows, otherwise `AddUsersEmailLowerUniqueIndex` stops:
+
+```sql
+-- Emails that exist in several letter cases (or with surrounding spaces)
+SELECT lower(trim("Email")) AS email, count(*), string_agg("Id"::text || ':' || "Email", ', ') AS accounts
+FROM "Users" GROUP BY 1 HAVING count(*) > 1;
+```
+
+Resolve each hit manually (decide which account is the real one, move or delete the other) before migrating.
+
+`AddUsersEmailLowerUniqueIndex` creates the unique index `IX_Users_Email_Lower` on `lower("Email")`, so PostgreSQL
+itself rejects `User@x.com` when `user@x.com` exists. It first checks for case-variant duplicates and stops with an
+explicit error (`Cannot create IX_Users_Email_Lower: N email address(es) exist in several letter cases`) without
+creating the index; each migration runs in its own transaction, so earlier migrations stay applied. EF Core cannot
+model expression indexes, so this index exists only in the migration SQL (the model snapshot is unchanged).
+The application also stores every new or changed email trimmed and in lower case (`GameNestDbContext.SaveChanges`).
+
+`AddExternalLogins` (Google sign-in) is additive: it creates the `ExternalLogins` table, adds the nullable
+`Users.AvatarUrl` column and makes `Users.PasswordHash` nullable. No data is removed. **Apply it before deploying
+the version with Google sign-in**, otherwise that version fails on its first database query. Rolling it back
+(`dotnet ef database update AuditDataIntegrity`) deletes all Google links and fails while Google-only users
+(without a password) exist.
+
+It does not create or change the unique indexes on `Users.Email` / `Users.Username` (they exist since
+`FinalizeMvpModels`), so it cannot fail because of duplicates in existing data. Those indexes are case-sensitive,
+and emails were not normalized before the email-confirmation release. Further read-only checks; all of them
+should return no rows:
+
+```sql
+-- Emails that differ only in case or surrounding spaces (Google sign-in answers 409 duplicate_accounts_for_email)
+SELECT lower(trim("Email")) AS email, count(*) FROM "Users" GROUP BY 1 HAVING count(*) > 1;
+-- Usernames that differ only in case (allowed by the index, but confusing)
+SELECT lower("Username") AS username, count(*) FROM "Users" GROUP BY 1 HAVING count(*) > 1;
+-- Emails that are not normalized (still found by Google sign-in, but not by password login or the admin command)
+SELECT "Id", "Email" FROM "Users" WHERE "Email" <> lower(trim("Email"));
+-- Which migrations are applied
+SELECT "MigrationId" FROM "__EFMigrationsHistory" ORDER BY 1;
+```
 
 ### Option A — `dotnet ef database update` from your computer
 
@@ -260,40 +324,386 @@ Back up (or create a Neon branch of) the production database before applying mig
 It requires no authentication, returns no internal data and does not touch the database, so it reports that the
 process is up, not that PostgreSQL is reachable.
 
-## Email Confirmation
+## Google Authentication
+
+Google confirms the user's identity; GameNest then issues **its own JWT** (the same token as password login).
+The Google ID token is never used as a GameNest token, never stored and never logged.
+
+### Endpoint
+
+`POST /api/Auth/google` — anonymous, rate limited like the other authentication endpoints (`429` with `Retry-After`).
+
+```http
+POST /api/Auth/google
+Content-Type: application/json
+
+{ "idToken": "<Google ID token: the `credential` returned by Google Identity Services>" }
+```
+
+`200 OK`:
+
+```json
+{
+  "token": "<GameNest JWT, HS256, valid for 1 hour>",
+  "isNewUser": true,
+  "user": { "id": 42, "username": "Olena_Hravets", "email": "olena@gmail.com", "role": "User", "avatarUrl": "https://lh3.googleusercontent.com/..." }
+}
+```
+
+Use the token like any other: `Authorization: Bearer <token>`. It contains the same claims as password login
+(user id, username, role).
+
+Errors (body `{"code": "..."}`, never stack traces):
+
+| Status | Code | Meaning |
+|---|---|---|
+| `400` | (validation problem) | `idToken` missing, empty or longer than 8192 characters |
+| `401` | `invalid_google_token` | Bad signature, wrong issuer, audience is not our client ID, expired, no `sub` or `email`, malformed |
+| `401` | `google_email_not_verified` | `email_verified` is not `true` |
+| `409` | `email_registered_unconfirmed` | An email/password account with this email exists but was never confirmed — not linked automatically |
+| `409` | `account_linked_to_another_google_account` | The account with this email is already linked to a different Google account |
+| `409` | `account_link_required` | An account with this email exists, but Google is not authoritative for the address (not Gmail, no matching Workspace `hd`): sign in with the password and link explicitly (`POST /api/Auth/google/link`) |
+| `409` | `duplicate_accounts_for_email` | Several legacy accounts differ only in the case of this email; an administrator must merge/clean them up |
+| `429` | `too_many_requests` | Rate limit |
+| `503` | `google_auth_unavailable` | Google's signing certificates could not be downloaded; retry later |
+| `503` | `google_auth_not_configured` | `Google__ClientId` is not set (possible only in Development) |
+| `503` | `google_sign_in_busy` | Concurrent requests kept conflicting; retry |
+
+### How it works
+
+1. The token is verified with the official `Google.Apis.Auth` library (`GoogleJsonWebSignature.ValidateAsync`):
+   RS256 signature against Google's published keys, issuer `accounts.google.com` / `https://accounts.google.com`,
+   audience = `Google__ClientId`, expiry (30 s clock tolerance). GameNest then re-checks issuer, audience and expiry
+   and requires a `sub`, a valid `email` and `email_verified == true`.
+   Only these verified claims are used; any other fields in the request body are ignored.
+2. The user is looked up by the Google account id (`sub`) in `ExternalLogins` — not by email, because a Google
+   email can change. Found → sign in (role unchanged).
+3. Not found, but a user with the same email exists (compared case-insensitively, so accounts created before email
+   normalization are found too; several case variants → `409 duplicate_accounts_for_email`):
+   - already linked to another Google account → `409 account_linked_to_another_google_account` (a linked `sub` is never replaced);
+   - email not confirmed → `409 email_registered_unconfirmed` (prevents taking over an account someone registered
+     with an address they do not own);
+   - Google is **not authoritative** for the address → `409 account_link_required` (see the table below);
+   - otherwise the Google identity is **linked** to that account. Role, password, email and `EmailConfirmed` are not changed.
+4. Otherwise a new user is created: role `User`, **no password** (`PasswordHash = null`, so password login is impossible
+   for it), username from the Google name (letters/digits, unique suffix on collisions; the email is never used as a
+   public username), avatar from the Google picture (https only). `EmailConfirmed` depends on the email kind (below).
+5. Unique indexes (`ExternalLogins(Provider, ProviderSubject)`, `ExternalLogins(UserId, Provider)`, `Users(Email)`,
+   `lower(Users.Email)`, `Users(Username)`) make concurrent requests safe; a conflicting insert is retried from the
+   start (up to 3 times).
+6. A repeated sign-in never changes the stored email or `EmailConfirmed`, even if the Google account's email changed.
+
+| Email kind | How it is detected | Auto-link to an existing confirmed account | `EmailConfirmed` for a new user |
+|---|---|---|---|
+| Gmail | address ends with `@gmail.com` or `@googlemail.com` | yes | `true` — Google operates the mailbox |
+| Google Workspace | `email_verified` and the `hd` claim is present **and equals the email's domain** | yes | `true` — the domain's administrator controls the account |
+| Other (Google account with an external address, or `hd` on a different domain) | everything else | **no** → `account_link_required` | `false` — Google checked the address once, but is not authoritative for its current owner |
+
+A user of the "Other" kind can still sign up and sign in with Google (the account is found by `sub`); only the
+email is not treated as confirmed. `EmailConfirmed` is checked only by the authentication code, so:
+
+| Feature | `EmailConfirmed = false` Google user |
+|---|---|
+| Google sign-in, GameNest JWT | ✅ |
+| Catalog (`GET /api/Games`, `/api/GameTitles/{id}/versions`), public profiles | ✅ |
+| Own profile and privacy settings (`/api/Profile`, `/api/Profile/privacy`) | ✅ (`emailConfirmed: false` in the response) |
+| Personal library (`/api/Library`), user-created games (`/api/UserGames`) | ✅ |
+| Game submissions (`/api/Submissions`: create, edit/delete own pending) | ✅ |
+| Admin endpoints | ❌ — require the `Admin` role, as for every user |
+| Promotion with `admin promote` | ❌ — the command requires a confirmed email |
+| Automatic linking to another existing account | ❌ (not applicable — the account is found by `sub`) |
+| Password login | ❌ — the account has no password |
+
+Its email does not prove mailbox ownership, so it must not be used for any future email-based feature
+(password reset, notifications that grant access) without a separate confirmation.
+
+### Explicit linking: `POST /api/Auth/google/link`
+
+Recovery path for `account_link_required` and for any existing password account (the emails do not need to match):
+
+```http
+POST /api/Auth/google/link
+Authorization: Bearer <GameNest JWT from POST /api/Auth/login>
+Content-Type: application/json
+
+{ "idToken": "<Google ID token>", "password": "<current account password>" }
+```
+
+The JWT proves the session, the password re-confirms the account owner (a stolen JWT alone cannot attach an
+attacker's Google account), and the ID token proves control of the Google account. Responses:
+`200 google_account_linked` / `200 google_account_already_linked`, `401 invalid_credentials` (wrong password),
+`401 invalid_google_token` / `google_email_not_verified`, `409 account_linked_to_another_google_account` (this user
+already has a different Google account), `409 google_account_linked_to_another_user`, `409 account_has_no_password`
+(Google-only account — nothing to link). Rate limited like the other authentication endpoints. Role, password,
+email and `EmailConfirmed` are not changed. The new link is written in a single `SaveChanges` (one database
+transaction); a concurrent link of the same Google account or user is stopped by the unique indexes.
+
+Roles never come from Google or from the request: new users are `User`, administrators are promoted only with the
+admin command (see "First Administrator").
+
+### Google Cloud Console setup (manual)
+
+1. <https://console.cloud.google.com/> → create or select a project.
+2. **Google Auth Platform** (formerly *OAuth consent screen*): app name `GameNest`, support email, audience
+   **External**; add the authorized domain `gamenest.pp.ua`, developer contact, privacy policy / terms URLs when
+   available. Scopes: only `openid`, `email`, `profile` (non-sensitive, no verification review needed).
+   Publish the app (status *In production*) — in *Testing* only listed test users can sign in.
+3. **Clients** (*Credentials*) → **Create client** → type **Web application**:
+   - **Authorized JavaScript origins:** `https://gamenest.pp.ua` and, for local frontend development,
+     `http://localhost:3000` (also `http://localhost` — Google requires it for localhost with Google Identity Services).
+   - Redirect URIs are not needed for the ID-token (popup / One Tap) flow.
+4. Copy the **Client ID** (`….apps.googleusercontent.com`) into Render as `Google__ClientId` and into the frontend
+   configuration. The **client secret is not used** — do not put it anywhere.
+
+### Email/password flow and the transition to Google
+
+The MVP is **Google-only**. The email/password endpoints, email confirmation and Resend stay in the code for
+future use, but both switches are off in production (`appsettings.json`) and nothing turns them on automatically:
+
+| Setting | Default (production) | Endpoints | When disabled |
+|---|---|---|---|
+| `Auth__PasswordRegistrationEnabled` | `false` — keep it off | `POST /api/Auth/register`, `POST /api/Auth/resend-confirmation` | `403 {"code":"password_registration_disabled"}` |
+| `Auth__PasswordLoginEnabled` | `false` | `POST /api/Auth/login` | `403 {"code":"password_login_disabled"}` |
+
+`POST /api/Auth/confirm-email` stays available (it only completes links that were already sent).
+In Development both flags are `true` (`appsettings.Development.json`).
+
+What happens to existing accounts:
+
+| Existing account | Password login on | Password login off |
+|---|---|---|
+| Confirmed, Gmail / matching Workspace | password, or Google (auto-linked) | Google (auto-linked) |
+| Confirmed, other address (e.g. `@gamenest.pp.ua` without Workspace, Outlook) | password; links Google via `/google/link` | **only if Google was linked before** — otherwise locked out |
+| Not confirmed | cannot log in (unchanged) | cannot log in |
+| Admin | as above for its email kind | as above — make sure every admin has Google linked first |
+
+Temporary transition for existing accounts (only if the database already has password users that are not Gmail /
+Workspace — check with the query in step 3):
+
+1. Apply the migrations, then in Render **explicitly** set `Auth__PasswordLoginEnabled=true` (registration stays off).
+2. Ask every existing user — administrators first — to sign in and link Google (automatic for Gmail/Workspace,
+   `POST /api/Auth/google/link` otherwise; the frontend needs a "Link Google account" action in the profile).
+3. Check who is still unlinked (read-only):
+
+   ```sql
+   SELECT u."Id", u."Username", u."Email", u."Role"
+   FROM "Users" u
+   WHERE u."PasswordHash" IS NOT NULL AND u."EmailConfirmed"
+     AND NOT EXISTS (SELECT 1 FROM "ExternalLogins" l WHERE l."UserId" = u."Id" AND l."Provider" = 'Google');
+   ```
+
+4. **Switch it off again** — set `Auth__PasswordLoginEnabled=false` (or delete the variable) in Render as soon as the
+   accounts are linked. If someone is locked out later, repeat the same temporary procedure (configuration only,
+   no code change).
+
+### Unconfirmed password accounts and Google sign-in
+
+If an email/password account with the same address exists but was never confirmed, Google sign-in answers
+`409 email_registered_unconfirmed` — also for Gmail and Workspace. This is deliberate:
+
+- **Pre-hijacking:** anyone could register `victim@gmail.com` with a password they know (before registration was
+  disabled). Linking or "confirming" that account when the real owner signs in with Google would give both people
+  access as soon as password login is enabled, and the attacker could watch or modify the victim's data.
+- Taking the account over automatically would require changing its password or deleting it — privileged changes
+  that should not happen as a side effect of signing in.
+- The account itself cannot have any data: password login requires a confirmed email, so an unconfirmed account
+  never had a session.
+
+Safe recovery (manual, by an operator): after verifying that the row is unconfirmed and has no related data, delete
+it (or let a future admin tool do exactly this), then ask the user to sign in with Google again:
+
+```sql
+-- read-only check first
+SELECT u."Id", u."Username", u."Email", u."EmailConfirmed",
+       (SELECT count(*) FROM "UserGames" g WHERE g."UserId" = u."Id") AS library,
+       (SELECT count(*) FROM "GameSubmissions" s WHERE s."SubmittedByUserId" = u."Id") AS submissions,
+       (SELECT count(*) FROM "UserCreatedGames" c WHERE c."UserId" = u."Id") AS own_games
+FROM "Users" u WHERE lower(u."Email") = lower('<email>');
+-- only if EmailConfirmed = false and all counts are 0:
+-- DELETE FROM "Users" WHERE "Id" = <id> AND NOT "EmailConfirmed";
+```
+
+Note: accounts that existed before email confirmation was introduced were marked as confirmed by the
+`AddP1ApiFeatures` migration without ever being verified. For Gmail/Workspace addresses they are linked
+automatically; see "Known Production Limitations".
+
+### Testing locally
+
+Google Identity Services needs a real Client ID and an authorized JavaScript origin, so an end-to-end test requires
+the frontend (or a small HTML page on `http://localhost:3000`) that obtains a token and posts it to the API.
+The automated tests use a fake validator and never contact Google.
+
+## Email Confirmation and Resend
 
 New accounts must confirm their email address before they can log in. Confirmation tokens are random,
 stored only as SHA-256 hashes, valid for 24 hours and single-use.
 
-**No email provider (SMTP or email API) is integrated yet.** The code has an `IEmailSender` abstraction with two implementations:
+### How emails are sent
 
-- **Development** — `DevelopmentEmailSender` writes the confirmation link to the console log
-  (`[Development email] Confirmation link for ...`); confirm in the frontend or via `POST /api/Auth/confirm-email`.
-- **Every other environment** — `UnavailableEmailSender` always fails, so registration returns
-  `503 email_service_unavailable` and the account is **not** created. It never pretends an email was sent.
+All emails go through the `IEmailSender` abstraction. The implementation is chosen at startup
+(`Services/EmailServiceCollectionExtensions.cs`):
 
-`POST /api/Auth/resend-confirmation` always returns `202` with the same body, so it does not reveal whether an email is registered.
+| Configuration | Sender | Behaviour |
+|---|---|---|
+| All `Resend__*` settings and `Email__ConfirmationUrlBase` set (any environment) | `ResendEmailSender` | Sends a real email through the Resend REST API |
+| No `Resend__*` settings, `Development` | `DevelopmentEmailSender` | Writes the confirmation link to the console log |
+| No `Resend__*` settings, any other environment | `UnavailableEmailSender` | Registration returns `503 email_service_unavailable`; a warning is logged at startup |
+| Some `Resend__*` settings, or Resend without a valid `Email__ConfirmationUrlBase` | — | The application **refuses to start** and names the missing setting |
 
-To enable registration in production, a real `IEmailSender` implementation (for example an HTTP email API provider)
-must be added and registered in `Services/EmailServiceCollectionExtensions.cs`, together with its configuration
-(API key as a secret environment variable, sender address, `Email__ConfirmationUrlBase`).
+`ResendEmailSender` calls `POST https://api.resend.com/emails` with `HttpClient` (no SDK, no SMTP):
+
+- headers `Authorization: Bearer <key>` and `User-Agent: GameNest-Backend/1.0` (Resend rejects requests without a User-Agent);
+- body with `from` (`<FromName> <FromEmail>`), `to`, `subject`, and both an HTML and a plain-text part (in Ukrainian);
+- success only for a 2xx response. HTTP errors, network failures and timeouts (`Resend__TimeoutSeconds`, default 15)
+  raise `EmailDeliveryException`; a cancelled request (client disconnected) is not reported as a delivery failure;
+- logs contain the HTTP status, Resend's error name and a sanitized message (recipient, token, link and key removed) —
+  never the API key, the confirmation token, the link or the recipient address.
+
+### Confirmation link
+
+The link is `Email__ConfirmationUrlBase` plus `?email=<url-encoded email>&token=<url-encoded token>`
+(query parameters already present in the base URL are kept). Production example:
+
+```text
+https://gamenest.pp.ua/confirm-email?email=user%40example.com&token=...
+```
+
+The frontend page must read `email` and `token` from the query string and send them unchanged to
+`POST /api/Auth/confirm-email` with the JSON body `{"email": "...", "token": "..."}`.
+
+> **Frontend status (checked 2026-11-10):** the current `GameNest_FrontEnd` does not call this API yet (it keeps its data
+> in `localStorage`) and has no `/confirm-email` page. Until that page exists, links in the emails lead nowhere.
+> Cloudflare must also serve that path (a `confirm-email` page or a single-page-app fallback).
+
+### Behaviour of the endpoints
+
+- `POST /api/Auth/register` → `201` only after Resend accepted the email. If sending fails, the new account is deleted
+  again and the API returns `503 email_service_unavailable`; the same email/username can register again later.
+  Unique indexes on email and username prevent duplicates.
+- `POST /api/Auth/resend-confirmation` → always `202` with the same body (does not reveal whether an email is registered).
+  A new token is stored only if the email was sent; otherwise the previous link stays valid.
+- `POST /api/Auth/confirm-email` → `200 email_confirmed`, or `400 invalid_or_expired_confirmation_token`.
+- An email address is never marked as confirmed because of a send attempt.
+
+Edge case: if Resend accepts the email but its response is lost (timeout), the account is removed and the delivered
+link then fails with `400`; the user simply registers again.
+
+### Setting up Resend (manual steps)
+
+1. **Account:** sign up at <https://resend.com>. Check the current free-plan quotas (daily and monthly) in the dashboard.
+2. **Domain:** Resend → **Domains** → **Add Domain** → `gamenest.pp.ua` (pick a region close to the users, e.g. EU).
+   Resend then shows the DNS records to create — typically:
+   - a `TXT` record `resend._domainkey` with the DKIM public key;
+   - an `MX` record and a `TXT` SPF record (`v=spf1 include:... ~all`) on the `send` subdomain (bounce handling);
+   - optionally a `TXT` record `_dmarc`, e.g. `v=DMARC1; p=none;`.
+
+   Always copy the exact names and values from the Resend dashboard; they are specific to the domain and region.
+3. **Cloudflare DNS** (dashboard → `gamenest.pp.ua` → **DNS** → **Records** → **Add record**), for each record from Resend:
+   - the same type (`TXT` / `MX`), the name without the zone (e.g. `resend._domainkey`, `send`), the value pasted exactly,
+     and the MX priority shown by Resend;
+   - proxy status **DNS only** (TXT/MX records are never proxied);
+   - these names (`send`, `resend._domainkey`) do not affect existing records of the root domain. If an SPF record already
+     exists on the same name, merge the values into one record instead of adding a second one.
+
+   Back in Resend, click **Verify DNS Records** and wait until the domain is **Verified** (propagation can take a while).
+4. **API key:** Resend → **API Keys** → **Create API Key**, permission **Sending access**, restricted to `gamenest.pp.ua`.
+   The key is shown once: paste it straight into the Render Dashboard as `Resend__ApiKey`. Never store it in files,
+   the repository, chats or issues; revoke and replace it if it is ever exposed.
+5. **Sender:** `Resend__FromEmail=no-reply@gamenest.pp.ua` and `Resend__FromName=GameNest` → emails come from
+   `GameNest <no-reply@gamenest.pp.ua>`. The address must belong to the verified domain.
+
+Until the domain is verified, Resend only allows test sends to your own account address; registering other users then
+fails with `503` (Resend answers `403 validation_error`).
+
+### Testing Resend locally (optional)
+
+Put the settings into User Secrets (never into `appsettings*.json`) and register through Swagger:
+
+```powershell
+dotnet user-secrets set "Resend:ApiKey" "<key>"
+dotnet user-secrets set "Resend:FromEmail" "no-reply@gamenest.pp.ua"
+```
+
+`Email:ConfirmationUrlBase` already comes from `appsettings.Development.json`. Remove the secrets again
+(`dotnet user-secrets remove "Resend:ApiKey"`, …) to return to the console sender.
+The automated tests never contact Resend: they use a fake `HttpMessageHandler`.
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| Startup fails: `Resend email configuration is incomplete or invalid: ...` | Only some `Resend__*` settings are set, `Resend__FromEmail` is not a plain address, or `Email__ConfirmationUrlBase` is missing / not an absolute URL |
+| Startup warning `No email provider is configured`, register → `503` | No `Resend__*` settings outside Development |
+| Register → `503`, log `Resend rejected ... HTTP 401` | Invalid, deleted or inactive API key |
+| Register → `503`, log `HTTP 403 ... validation_error` | Domain not verified, `FromEmail` not on the verified domain, or test-mode restrictions |
+| Register → `503`, log `HTTP 429` | Rate limit or daily/monthly quota exceeded |
+| Register → `503`, log `Resend is unreachable` / `did not respond within` | Network/DNS problem or Resend outage; retry later |
+| Link opens a 404 page | The frontend `/confirm-email` page does not exist yet |
+| `400 invalid_or_expired_confirmation_token` | Link older than 24 h, already used, replaced by a newer resend, or altered |
 
 ## First Administrator
 
-There is no API to assign roles. The first administrator is created once, directly in the database:
+There is no HTTP endpoint to assign roles, and users cannot change their own role. The first administrator is
+promoted once with a local command built into the application:
 
-1. Register the future administrator through the API and confirm the email address.
-2. Edit `scripts/bootstrap-first-admin.sql` locally and replace the placeholder email (do not commit that change).
-3. Run it against the target database:
+```text
+dotnet run --no-launch-profile -- admin promote --email <email> [--additional]
+```
+
+How it works:
+
+- it runs **instead of** the web server and needs only `ConnectionStrings__DefaultConnection` (no JWT, CORS or Resend settings);
+- `--no-launch-profile` keeps the default `Production` environment, so User Secrets are **not** loaded and the database
+  is exactly the one from the environment variable;
+- the user is looked up by the exact (normalized) email address. Arguments are parsed strictly: unknown arguments,
+  several emails, `Name <email>` forms and wildcards are rejected;
+- it refuses (and changes nothing) if the user does not exist, the email is not confirmed, or another administrator
+  already exists (`--additional` deliberately allows a further administrator);
+- it shows the database host/name and the user's id, username, email and role, and asks you to **type the username** to confirm;
+- it changes only the `Role` column from `User` to `Admin`, in a transaction (password and other data untouched);
+- running it again for a user who is already an administrator is a harmless no-op.
+
+Exit codes: `0` success / already admin, `1` invalid arguments, `2` user not found, `3` email not confirmed,
+`4` confirmation did not match, `5` an administrator already exists, `6` missing/invalid connection string, `7` database error.
+
+### Step by step (production, Neon)
+
+1. The future administrator signs up with Google through the frontend (this also confirms the email address).
+   With email/password registration enabled, registering and opening the confirmation link works too.
+2. Use the same email address in the command below.
+3. On your computer, from the repository root (PowerShell):
 
    ```powershell
-   psql "<connection string>" -v ON_ERROR_STOP=1 -f scripts/bootstrap-first-admin.sql
+   Remove-Item Env:ASPNETCORE_ENVIRONMENT -ErrorAction SilentlyContinue
+   $env:ConnectionStrings__DefaultConnection = Read-Host "Neon connection string"
+
+   dotnet run --no-launch-profile -- admin promote --email admin@example.com
+
+   Remove-Item Env:ConnectionStrings__DefaultConnection
    ```
 
-4. The user must log in again to receive a token with the `Admin` role.
+   Example session:
 
-The script runs in a transaction and aborts if an administrator already exists, the placeholder was not replaced,
-the email does not match exactly one user, or that user's email is not confirmed.
+   ```text
+   About to grant the Admin role:
+     database : host=ep-xxxx.eu-central-1.aws.neon.tech, port=5432, database=neondb, user=neondb_owner
+     user id  : 1
+     username : admin_user
+     email    : admin@example.com
+     role     : User -> Admin
+   Type the username 'admin_user' to confirm (anything else aborts): admin_user
+   Done: user 'admin_user' (admin@example.com, id 1) is now an administrator.
+   Existing tokens keep the old role until they expire (up to 1 hour): the user must log in again.
+   ```
+
+4. The user logs in again to receive a token with the `Admin` role.
+
+No bootstrap password or admin credentials exist anywhere: the administrator keeps signing in with Google
+(or the password they registered with).
+Do not add anything to Render for this — the command is run locally only.
+
+`scripts/bootstrap-first-admin.sql` remains as an equivalent manual alternative
+(`psql "<connection string>" -v ON_ERROR_STOP=1 -f scripts/bootstrap-first-admin.sql` after replacing the placeholder email locally).
 
 ## Security
 
@@ -301,23 +711,42 @@ the email does not match exactly one user, or that user's email is not confirmed
 - Login responses and timing are the same for unknown emails and wrong passwords.
 - Tokens are HS256-signed, valid for one hour, and must contain a valid user id; detailed token errors are shown only in Development.
 - Authentication endpoints are rate limited per client IP and endpoint (`429` with `Retry-After`).
+- Roles can only be changed with direct database access (the admin command or SQL script), never through the API.
 - Swagger UI and OpenAPI JSON are available only in Development.
 - HTTPS redirection is not enabled in the application; TLS is terminated by Render / Cloudflare.
-- Secrets must never be committed. Any secret that has ever been committed must be considered compromised and rotated.
+- Secrets (database password, JWT key, Resend API key) must never be committed. Any secret that has ever been
+  committed must be considered compromised and rotated.
 
 ## Known Production Limitations
 
-1. **Registration does not work in production** until an email provider is integrated (`503 email_service_unavailable`).
-   Consequently no user can log in on a fresh database, the first administrator cannot be created, and the catalog
-   (which has no seed data) stays empty.
-2. **Rate limiting behind Render's proxy**: the limiter uses the direct connection IP. Forwarded headers are not trusted,
+1. **The frontend is not connected to the API yet**: it has no Google sign-in button and does not call
+   `POST /api/Auth/google`. Until it does, nobody can sign up in production, the first administrator cannot be
+   promoted, and the catalog stays empty (there is no seed data).
+2. **Google sign-in has only been tested with a fake validator** (and the real library rejecting malformed tokens);
+   a sign-in with a real Google account must be checked once the Client ID and the frontend exist.
+3. The Google ID-token flow needs Google's signing certificates; if they cannot be downloaded, sign-in returns `503`.
+4. Email/password registration (disabled by default) depends on Resend: with it enabled, the domain must be verified
+   and all `Resend__*` variables set, otherwise it returns `503`. The `/confirm-email` frontend page does not exist yet.
+5. **Rate limiting behind Render's proxy**: the limiter uses the direct connection IP. Forwarded headers are not trusted,
    so on Render all clients may share the proxy's address and therefore one limit (10 auth requests per minute in total
    by default). Trusting `X-Forwarded-For` safely requires knowing the proxy chain; this is not configured yet.
-3. The rate limiter is in-memory and per instance; limits reset when the service restarts.
-4. **Render Free** spins the service down after inactivity; the first request afterwards can take up to about a minute.
+6. The rate limiter is in-memory and per instance; limits reset when the service restarts.
+7. **Render Free** spins the service down after inactivity; the first request afterwards can take up to about a minute.
    **Neon Free** suspends the compute when idle, which adds latency to the first database query.
-5. The health check does not verify database connectivity.
-6. Migrations must be applied manually (see above).
+8. The health check does not verify database connectivity.
+9. Migrations must be applied manually (see above).
+10. Users cannot unlink Google or set a password; there is no account-deletion endpoint.
+11. An unconfirmed email/password account blocks Google sign-up for that address (`409 email_registered_unconfirmed`)
+    until an administrator deletes the stale account; nothing is taken over automatically.
+12. A Google account with an external address (kind "Other") occupies that email in GameNest; if the real mailbox
+    owner later signs in with a different Google account, they get `409 account_linked_to_another_google_account`
+    and an administrator has to resolve it.
+13. Accounts created before email confirmation existed were marked `EmailConfirmed = true` by `AddP1ApiFeatures`
+    without verification. If someone registered another person's Gmail address back then, that person's first Google
+    sign-in links to the old account (and its password still works whenever password login is enabled). Review such
+    accounts before enabling password login for the transition.
+14. Existing emails that are not lower-case are found by Google sign-in, but not by password login or the admin
+    command (they compare exactly); fix them with the read-only check above and a manual update.
 
 ## License
 
