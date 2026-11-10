@@ -14,37 +14,88 @@ namespace GameNest_BackEnd.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-public class AuthController(GameNestDbContext context, IEmailSender emailSender, IConfiguration configuration) : ControllerBase
+public class AuthController(GameNestDbContext context, IEmailSender emailSender, IConfiguration configuration, ILogger<AuthController> logger) : ControllerBase
 {
+    private static readonly TimeSpan ConfirmationTokenLifetime = TimeSpan.FromHours(24);
+
     private static string HashConfirmationToken(string token) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
+    private static string NormalizeEmail(string email) => email.Trim().ToLowerInvariant();
+    private static string CreateConfirmationToken() => Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+
+    private static void SetConfirmationToken(User user, string token)
+    {
+        user.EmailConfirmationTokenHash = HashConfirmationToken(token);
+        user.EmailConfirmationTokenExpiresAt = DateTime.UtcNow.Add(ConfirmationTokenLifetime);
+    }
 
     [HttpPost("register")]
     public async Task<IActionResult> Register(RegisterDto dto)
     {
         var username = dto.Username.Trim();
-        var email = dto.Email.Trim().ToLowerInvariant();
+        var email = NormalizeEmail(dto.Email);
         if (await context.Users.AnyAsync(u => u.Username == username || u.Email == email, HttpContext.RequestAborted))
             return Conflict(new { code = "username_or_email_already_exists" });
 
-        var confirmationToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        var confirmationToken = CreateConfirmationToken();
         var user = new User
         {
             Username = username, Email = email, PasswordHash = BCrypt.Net.BCrypt.HashPassword(dto.Password), Role = "User",
-            EmailConfirmed = false, EmailConfirmationTokenHash = HashConfirmationToken(confirmationToken),
-            EmailConfirmationTokenExpiresAt = DateTime.UtcNow.AddHours(24)
+            EmailConfirmed = false
         };
+        SetConfirmationToken(user, confirmationToken);
         context.Users.Add(user);
         try { await context.SaveChangesAsync(HttpContext.RequestAborted); }
         catch (DbUpdateException) { return Conflict(new { code = "username_or_email_already_exists" }); }
 
-        await emailSender.SendEmailConfirmationAsync(user.Email, confirmationToken, HttpContext.RequestAborted);
+        try
+        {
+            await emailSender.SendEmailConfirmationAsync(user.Email, confirmationToken, HttpContext.RequestAborted);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Without the email the account could never be confirmed, so do not keep it.
+            logger.LogError(ex, "Confirmation email could not be sent; the new account was removed.");
+            context.Users.Remove(user);
+            await context.SaveChangesAsync(CancellationToken.None);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { code = "email_service_unavailable" });
+        }
+
         return StatusCode(StatusCodes.Status201Created, new { code = "registration_success" });
+    }
+
+    /// <summary>
+    /// Issues a new confirmation token for an unconfirmed account. Always returns the same response,
+    /// so the endpoint does not reveal whether an email address is registered or already confirmed.
+    /// </summary>
+    [HttpPost("resend-confirmation")]
+    public async Task<IActionResult> ResendConfirmation(ResendConfirmationDto dto)
+    {
+        var email = NormalizeEmail(dto.Email);
+        var user = await context.Users.SingleOrDefaultAsync(u => u.Email == email, HttpContext.RequestAborted);
+        if (user is { EmailConfirmed: false })
+        {
+            var confirmationToken = CreateConfirmationToken();
+            try
+            {
+                // Send first: if delivery fails, the previous token stays valid.
+                await emailSender.SendEmailConfirmationAsync(user.Email, confirmationToken, HttpContext.RequestAborted);
+                SetConfirmationToken(user, confirmationToken);
+                await context.SaveChangesAsync(HttpContext.RequestAborted);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogError(ex, "Confirmation email could not be resent.");
+            }
+        }
+
+        return Accepted(new { code = "confirmation_resend_requested" });
     }
 
     [HttpPost("confirm-email")]
     public async Task<IActionResult> ConfirmEmail(ConfirmEmailDto dto)
     {
-        var user = await context.Users.SingleOrDefaultAsync(u => u.Email == dto.Email.Trim().ToLower(), HttpContext.RequestAborted);
+        var email = NormalizeEmail(dto.Email);
+        var user = await context.Users.SingleOrDefaultAsync(u => u.Email == email, HttpContext.RequestAborted);
         if (user is null || user.EmailConfirmed || user.EmailConfirmationTokenExpiresAt <= DateTime.UtcNow || !TokenMatches(user.EmailConfirmationTokenHash, dto.Token))
             return BadRequest(new { code = "invalid_or_expired_confirmation_token" });
         user.EmailConfirmed = true;
@@ -57,7 +108,8 @@ public class AuthController(GameNestDbContext context, IEmailSender emailSender,
     [HttpPost("login")]
     public async Task<IActionResult> Login(LoginDto dto)
     {
-        var user = await context.Users.SingleOrDefaultAsync(u => u.Email == dto.Email.Trim().ToLower(), HttpContext.RequestAborted);
+        var email = NormalizeEmail(dto.Email);
+        var user = await context.Users.SingleOrDefaultAsync(u => u.Email == email, HttpContext.RequestAborted);
         if (user is null || !BCrypt.Net.BCrypt.Verify(dto.Password, user.PasswordHash)) return Unauthorized(new { code = "invalid_credentials" });
         if (!user.EmailConfirmed) return Unauthorized(new { code = "email_not_confirmed" });
         return Ok(new { token = CreateToken(user) });

@@ -28,7 +28,7 @@ var jwtAudience = RequireSetting(builder.Configuration, "Jwt:Audience");
 var connectionString = RequireSetting(builder.Configuration, "ConnectionStrings:DefaultConnection");
 
 builder.Services.AddControllers();
-builder.Services.AddScoped<IEmailSender, LoggingEmailSender>();
+builder.Services.AddEmailSender(builder.Configuration);
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
