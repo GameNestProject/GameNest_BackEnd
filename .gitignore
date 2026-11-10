@@ -9,9 +9,13 @@ obj/
 *.user
 *.suo
 
-# Environment files
+# Environment files (the placeholder-only example is committed)
 .env
 .env.*
+!.env.example
+
+# Local configuration overrides
+appsettings.*.local.json
 
 # User Secrets
 secrets.json
