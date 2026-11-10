@@ -29,6 +29,7 @@ var connectionString = RequireSetting(builder.Configuration, "ConnectionStrings:
 
 builder.Services.AddControllers();
 builder.Services.AddEmailSender(builder.Configuration);
+builder.Services.AddAuthRateLimiting(builder.Configuration);
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
@@ -86,6 +87,8 @@ if (app.Environment.IsDevelopment())
 
 // HTTPS поки не чіпаємо
 // app.UseHttpsRedirection();
+
+app.UseRateLimiter();
 
 app.UseAuthentication();
 app.UseAuthorization();

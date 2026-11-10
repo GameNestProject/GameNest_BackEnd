@@ -3,6 +3,7 @@ using GameNest_BackEnd.DTOs.Auth;
 using GameNest_BackEnd.Models;
 using GameNest_BackEnd.Services;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
@@ -28,7 +29,7 @@ public class AuthController(GameNestDbContext context, IEmailSender emailSender,
         user.EmailConfirmationTokenExpiresAt = DateTime.UtcNow.Add(ConfirmationTokenLifetime);
     }
 
-    [HttpPost("register")]
+    [HttpPost("register"), EnableRateLimiting(AuthRateLimiting.AuthPolicy)]
     public async Task<IActionResult> Register(RegisterDto dto)
     {
         var username = dto.Username.Trim();
@@ -67,7 +68,7 @@ public class AuthController(GameNestDbContext context, IEmailSender emailSender,
     /// Issues a new confirmation token for an unconfirmed account. Always returns the same response,
     /// so the endpoint does not reveal whether an email address is registered or already confirmed.
     /// </summary>
-    [HttpPost("resend-confirmation")]
+    [HttpPost("resend-confirmation"), EnableRateLimiting(AuthRateLimiting.ResendConfirmationPolicy)]
     public async Task<IActionResult> ResendConfirmation(ResendConfirmationDto dto)
     {
         var email = NormalizeEmail(dto.Email);
@@ -91,7 +92,7 @@ public class AuthController(GameNestDbContext context, IEmailSender emailSender,
         return Accepted(new { code = "confirmation_resend_requested" });
     }
 
-    [HttpPost("confirm-email")]
+    [HttpPost("confirm-email"), EnableRateLimiting(AuthRateLimiting.AuthPolicy)]
     public async Task<IActionResult> ConfirmEmail(ConfirmEmailDto dto)
     {
         var email = NormalizeEmail(dto.Email);
@@ -105,7 +106,7 @@ public class AuthController(GameNestDbContext context, IEmailSender emailSender,
         return Ok(new { code = "email_confirmed" });
     }
 
-    [HttpPost("login")]
+    [HttpPost("login"), EnableRateLimiting(AuthRateLimiting.AuthPolicy)]
     public async Task<IActionResult> Login(LoginDto dto)
     {
         var email = NormalizeEmail(dto.Email);
