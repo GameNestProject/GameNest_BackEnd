@@ -11,6 +11,18 @@ public class EmailOptions
     /// </summary>
     public string? ConfirmationUrlBase { get; set; }
 
+    /// <summary>Returns problems with a confirmation URL base that real emails would link to.</summary>
+    public static IReadOnlyList<string> ValidateConfirmationUrlBase(string? baseUrl)
+    {
+        if (string.IsNullOrWhiteSpace(baseUrl))
+            return ["Email:ConfirmationUrlBase (environment variable Email__ConfirmationUrlBase) is not set."];
+        if (!Uri.TryCreate(baseUrl.Trim(), UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp)
+            || !string.IsNullOrEmpty(uri.Fragment))
+            return ["Email:ConfirmationUrlBase must be an absolute http(s) URL without a #fragment, e.g. https://gamenest.pp.ua/confirm-email."];
+        return [];
+    }
+
     public static string BuildConfirmationUrl(string baseUrl, string email, string token)
     {
         var separator = baseUrl.Contains('?') ? '&' : '?';
