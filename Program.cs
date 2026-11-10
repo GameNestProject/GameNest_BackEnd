@@ -2,6 +2,7 @@ using GameNest_BackEnd.Data;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using System.Security.Claims;
 using System.Text;
 using Microsoft.OpenApi;
 using GameNest_BackEnd.Services;
@@ -28,7 +29,8 @@ var jwtAudience = RequireSetting(builder.Configuration, "Jwt:Audience");
 var connectionString = RequireSetting(builder.Configuration, "ConnectionStrings:DefaultConnection");
 
 builder.Services.AddControllers();
-builder.Services.AddScoped<IEmailSender, LoggingEmailSender>();
+builder.Services.AddEmailSender(builder.Configuration);
+builder.Services.AddAuthRateLimiting(builder.Configuration);
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
@@ -48,7 +50,23 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
                 Encoding.UTF8.GetBytes(
                     jwtKey
                 )
-            )
+            ),
+            ValidAlgorithms = [SecurityAlgorithms.HmacSha256]
+        };
+
+        // Detailed reasons ("token expired at ...", "signature key was not found") only help attackers outside Development.
+        options.IncludeErrorDetails = builder.Environment.IsDevelopment();
+
+        options.Events = new JwtBearerEvents
+        {
+            // Controllers read the user id from this claim; reject tokens that do not carry a valid one
+            // so that requests fail with 401 instead of 500.
+            OnTokenValidated = context =>
+            {
+                if (!int.TryParse(context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier), out var userId) || userId <= 0)
+                    context.Fail("The token does not contain a valid user id.");
+                return Task.CompletedTask;
+            }
         };
     });
 
@@ -86,6 +104,8 @@ if (app.Environment.IsDevelopment())
 
 // HTTPS поки не чіпаємо
 // app.UseHttpsRedirection();
+
+app.UseRateLimiter();
 
 app.UseAuthentication();
 app.UseAuthorization();
