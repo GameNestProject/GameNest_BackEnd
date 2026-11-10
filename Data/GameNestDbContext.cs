@@ -10,6 +10,37 @@ public class GameNestDbContext : DbContext
     {
     }
 
+    // Emails are stored normalized (trimmed, lower-case) whatever code path saves a user, so that the
+    // case-insensitive unique index on lower("Email") and exact-match lookups agree.
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        NormalizeUserEmails();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    {
+        NormalizeUserEmails();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
+    public static string NormalizeEmail(string email) => email.Trim().ToLowerInvariant();
+
+    private void NormalizeUserEmails()
+    {
+        foreach (var entry in ChangeTracker.Entries<User>())
+        {
+            // Only new users and explicit email changes: an unrelated update (e.g. linking Google) leaves a legacy value untouched.
+            var emailWritten = entry.State == EntityState.Added
+                               || (entry.State == EntityState.Modified && entry.Property(u => u.Email).IsModified);
+            if (emailWritten && entry.Entity.Email is { } email)
+            {
+                var normalized = NormalizeEmail(email);
+                if (normalized != email) entry.Entity.Email = normalized;
+            }
+        }
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);

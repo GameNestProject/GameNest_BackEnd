@@ -117,25 +117,39 @@ public class GoogleAccountLinkingTests(GoogleApiFactory factory) : IClassFixture
         Assert.False(stored.EmailConfirmed);
     }
 
+    /// <summary>Inserts a row as it may exist in an old database (email not normalized), bypassing EF's normalization.</summary>
+    private async Task<int> InsertLegacyUserAsync(string email)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<GameNestDbContext>();
+        var username = "legacy" + TestHelpers.UniqueSuffix();
+        await db.Database.ExecuteSqlRawAsync(
+            """INSERT INTO "Users" ("Username","Email","PasswordHash","Role","EmailConfirmed","IsProfilePublic","IsLibraryPublic") VALUES ({0},{1},'x','User',1,1,1)""",
+            username, email);
+        return await db.Users.Where(u => u.Username == username).Select(u => u.Id).SingleAsync();
+    }
+
     [Fact]
     public async Task Legacy_mixed_case_email_is_matched_instead_of_creating_a_duplicate()
     {
         var lower = Unique("gmail.com");
-        var user = await factory.SeedUserAsync(email: char.ToUpperInvariant(lower[0]) + lower[1..]);
+        var legacyId = await InsertLegacyUserAsync(char.ToUpperInvariant(lower[0]) + lower[1..]);
 
         var (status, body) = await SignInAsync(new GoogleIdentity(Sub(), lower, "Legacy", null));
 
         Assert.Equal(HttpStatusCode.OK, status);
-        Assert.Equal(user.Id, body.GetProperty("user").GetProperty("id").GetInt32());
+        Assert.Equal(legacyId, body.GetProperty("user").GetProperty("id").GetInt32());
         Assert.Equal(1, await CountUsersAsync(lower));
+        Assert.NotEqual(lower, (await LoadAsync(legacyId)).Email); // linking does not rewrite the stored email
     }
 
     [Fact]
     public async Task Case_variant_duplicates_are_never_linked_automatically()
     {
+        // Possible only in a database where AddUsersEmailLowerUniqueIndex has not been applied yet.
         var lower = Unique("gmail.com");
-        await factory.SeedUserAsync(email: lower);
-        await factory.SeedUserAsync(email: lower.ToUpperInvariant());
+        await InsertLegacyUserAsync(lower);
+        await InsertLegacyUserAsync(lower.ToUpperInvariant());
 
         var (status, body) = await SignInAsync(new GoogleIdentity(Sub(), lower, "Dup", null));
 

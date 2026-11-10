@@ -2,9 +2,9 @@ namespace GameNest_BackEnd.Services;
 
 /// <summary>
 /// Switches for the email/password flow (section <c>Auth</c>). The code, data and email confirmation stay in place;
-/// disabled endpoints answer <c>403</c> with a <c>*_disabled</c> code. MVP default (appsettings.json): new accounts only
-/// through Google (registration off), password login still on so existing accounts can sign in and link Google
-/// (<c>POST /api/Auth/google/link</c>). Turn login off with <c>Auth__PasswordLoginEnabled=false</c> once they have moved.
+/// disabled endpoints answer <c>403</c> with a <c>*_disabled</c> code. MVP default (appsettings.json): Google-only, both
+/// switches off. For a temporary migration of existing accounts an operator may set <c>Auth__PasswordLoginEnabled=true</c>
+/// explicitly (users then sign in and link Google via <c>POST /api/Auth/google/link</c>) and must switch it off afterwards.
 /// </summary>
 public class AuthFeatureOptions
 {

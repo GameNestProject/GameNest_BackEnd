@@ -41,6 +41,9 @@ public class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
 
     public const string GoogleClientId = "gamenest-tests.apps.googleusercontent.com";
 
+    /// <summary>False: the Auth switches come only from appsettings.json (the production defaults).</summary>
+    protected virtual bool EnablePasswordAuth => true;
+
     protected virtual IDictionary<string, string?> ExtraConfiguration => new Dictionary<string, string?>
     {
         ["RateLimiting:Auth:PermitLimit"] = "10000",
@@ -59,11 +62,15 @@ public class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
                 ["Jwt:Audience"] = JwtAudience,
                 ["ConnectionStrings:DefaultConnection"] = "unused",
                 ["CORS_ALLOWED_ORIGINS"] = AllowedOrigin,
-                ["Google:ClientId"] = GoogleClientId,
-                // The existing email/password tests need the flow enabled; Google-only mode has its own tests.
-                ["Auth:PasswordRegistrationEnabled"] = "true",
-                ["Auth:PasswordLoginEnabled"] = "true"
+                ["Google:ClientId"] = GoogleClientId
             });
+            // The existing email/password tests need the flow enabled; Google-only mode has its own tests.
+            if (EnablePasswordAuth)
+                c.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Auth:PasswordRegistrationEnabled"] = "true",
+                    ["Auth:PasswordLoginEnabled"] = "true"
+                });
             c.AddInMemoryCollection(ExtraConfiguration);
         });
         builder.ConfigureServices(services =>

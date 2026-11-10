@@ -122,7 +122,7 @@ or invalid (it never falls back to a built-in key or connection string).
 | `Resend__TimeoutSeconds` | no | no | Timeout of a Resend request, default `15` |
 | `Google__ClientId` | yes outside Development | no | OAuth 2.0 **Web** client ID (`….apps.googleusercontent.com`). No client secret is needed |
 | `Auth__PasswordRegistrationEnabled` | no | no | `false` by default (`true` in `appsettings.Development.json`): register + resend-confirmation |
-| `Auth__PasswordLoginEnabled` | no | no | `true` by default during the transition to Google (see "Email/password flow and the transition to Google") |
+| `Auth__PasswordLoginEnabled` | no | no | `false` by default (Google-only); set to `true` only temporarily to migrate existing accounts (see "Email/password flow and the transition to Google") |
 | `PORT` | no | no | Port to listen on (all interfaces). Set automatically by Render |
 | `RateLimiting__Auth__PermitLimit` / `__WindowSeconds` | no | no | Default `10` / `60`: register, login, confirm-email |
 | `RateLimiting__ResendConfirmation__PermitLimit` / `__WindowSeconds` | no | no | Default `5` / `900` |
@@ -235,7 +235,25 @@ Migrations are **not** applied automatically at startup: a migration should run 
 version starts, and never concurrently from several instances. Apply them manually when a release contains new migrations.
 
 Current migrations (oldest first): `InitialCreate`, `AddUsers`, `FinalizeMvpModels`, `AddP1ApiFeatures`,
-`AuditDataIntegrity`, `AddExternalLogins`. A new, empty Neon database gets all of them.
+`AuditDataIntegrity`, `AddExternalLogins`, `AddUsersEmailLowerUniqueIndex`. A new, empty Neon database gets all of them.
+
+**Before applying migrations to a database that already has users**, run this read-only check (e.g. in the Neon
+SQL Editor). It must return no rows, otherwise `AddUsersEmailLowerUniqueIndex` stops:
+
+```sql
+-- Emails that exist in several letter cases (or with surrounding spaces)
+SELECT lower(trim("Email")) AS email, count(*), string_agg("Id"::text || ':' || "Email", ', ') AS accounts
+FROM "Users" GROUP BY 1 HAVING count(*) > 1;
+```
+
+Resolve each hit manually (decide which account is the real one, move or delete the other) before migrating.
+
+`AddUsersEmailLowerUniqueIndex` creates the unique index `IX_Users_Email_Lower` on `lower("Email")`, so PostgreSQL
+itself rejects `User@x.com` when `user@x.com` exists. It first checks for case-variant duplicates and stops with an
+explicit error (`Cannot create IX_Users_Email_Lower: N email address(es) exist in several letter cases`) without
+creating the index; each migration runs in its own transaction, so earlier migrations stay applied. EF Core cannot
+model expression indexes, so this index exists only in the migration SQL (the model snapshot is unchanged).
+The application also stores every new or changed email trimmed and in lower case (`GameNestDbContext.SaveChanges`).
 
 `AddExternalLogins` (Google sign-in) is additive: it creates the `ExternalLogins` table, adds the nullable
 `Users.AvatarUrl` column and makes `Users.PasswordHash` nullable. No data is removed. **Apply it before deploying
@@ -245,8 +263,8 @@ the version with Google sign-in**, otherwise that version fails on its first dat
 
 It does not create or change the unique indexes on `Users.Email` / `Users.Username` (they exist since
 `FinalizeMvpModels`), so it cannot fail because of duplicates in existing data. Those indexes are case-sensitive,
-however, and emails were not normalized before the email-confirmation release. Before deploying, run these
-read-only checks against the target database (e.g. in the Neon SQL Editor); all of them should return no rows:
+and emails were not normalized before the email-confirmation release. Further read-only checks; all of them
+should return no rows:
 
 ```sql
 -- Emails that differ only in case or surrounding spaces (Google sign-in answers 409 duplicate_accounts_for_email)
@@ -370,6 +388,10 @@ Errors (body `{"code": "..."}`, never stack traces):
 4. Otherwise a new user is created: role `User`, **no password** (`PasswordHash = null`, so password login is impossible
    for it), username from the Google name (letters/digits, unique suffix on collisions; the email is never used as a
    public username), avatar from the Google picture (https only). `EmailConfirmed` depends on the email kind (below).
+5. Unique indexes (`ExternalLogins(Provider, ProviderSubject)`, `ExternalLogins(UserId, Provider)`, `Users(Email)`,
+   `lower(Users.Email)`, `Users(Username)`) make concurrent requests safe; a conflicting insert is retried from the
+   start (up to 3 times).
+6. A repeated sign-in never changes the stored email or `EmailConfirmed`, even if the Google account's email changed.
 
 | Email kind | How it is detected | Auto-link to an existing confirmed account | `EmailConfirmed` for a new user |
 |---|---|---|---|
@@ -378,8 +400,22 @@ Errors (body `{"code": "..."}`, never stack traces):
 | Other (Google account with an external address, or `hd` on a different domain) | everything else | **no** → `account_link_required` | `false` — Google checked the address once, but is not authoritative for its current owner |
 
 A user of the "Other" kind can still sign up and sign in with Google (the account is found by `sub`); only the
-email is not treated as confirmed. Consequences: such an account cannot be promoted with the admin command (it
-requires a confirmed email) and its email does not prove ownership for any future email-based feature.
+email is not treated as confirmed. `EmailConfirmed` is checked only by the authentication code, so:
+
+| Feature | `EmailConfirmed = false` Google user |
+|---|---|
+| Google sign-in, GameNest JWT | ✅ |
+| Catalog (`GET /api/Games`, `/api/GameTitles/{id}/versions`), public profiles | ✅ |
+| Own profile and privacy settings (`/api/Profile`, `/api/Profile/privacy`) | ✅ (`emailConfirmed: false` in the response) |
+| Personal library (`/api/Library`), user-created games (`/api/UserGames`) | ✅ |
+| Game submissions (`/api/Submissions`: create, edit/delete own pending) | ✅ |
+| Admin endpoints | ❌ — require the `Admin` role, as for every user |
+| Promotion with `admin promote` | ❌ — the command requires a confirmed email |
+| Automatic linking to another existing account | ❌ (not applicable — the account is found by `sub`) |
+| Password login | ❌ — the account has no password |
+
+Its email does not prove mailbox ownership, so it must not be used for any future email-based feature
+(password reset, notifications that grant access) without a separate confirmation.
 
 ### Explicit linking: `POST /api/Auth/google/link`
 
@@ -399,9 +435,8 @@ attacker's Google account), and the ID token proves control of the Google accoun
 `401 invalid_google_token` / `google_email_not_verified`, `409 account_linked_to_another_google_account` (this user
 already has a different Google account), `409 google_account_linked_to_another_user`, `409 account_has_no_password`
 (Google-only account — nothing to link). Rate limited like the other authentication endpoints. Role, password,
-email and `EmailConfirmed` are not changed.
-5. Unique indexes (`ExternalLogins(Provider, ProviderSubject)`, `ExternalLogins(UserId, Provider)`, `Users(Email)`,
-   `Users(Username)`) make concurrent requests safe; a conflicting insert is retried from the start (up to 3 times).
+email and `EmailConfirmed` are not changed. The new link is written in a single `SaveChanges` (one database
+transaction); a concurrent link of the same Google account or user is stopped by the unique indexes.
 
 Roles never come from Google or from the request: new users are `User`, administrators are promoted only with the
 admin command (see "First Administrator").
@@ -422,13 +457,13 @@ admin command (see "First Administrator").
 
 ### Email/password flow and the transition to Google
 
-The email/password endpoints, email confirmation and Resend are kept. New public accounts are created only through
-Google; password **login** stays on by default so that existing accounts never lose access:
+The MVP is **Google-only**. The email/password endpoints, email confirmation and Resend stay in the code for
+future use, but both switches are off in production (`appsettings.json`) and nothing turns them on automatically:
 
 | Setting | Default (production) | Endpoints | When disabled |
 |---|---|---|---|
-| `Auth__PasswordRegistrationEnabled` | `false` | `POST /api/Auth/register`, `POST /api/Auth/resend-confirmation` | `403 {"code":"password_registration_disabled"}` |
-| `Auth__PasswordLoginEnabled` | `true` (transition) | `POST /api/Auth/login` | `403 {"code":"password_login_disabled"}` |
+| `Auth__PasswordRegistrationEnabled` | `false` — keep it off | `POST /api/Auth/register`, `POST /api/Auth/resend-confirmation` | `403 {"code":"password_registration_disabled"}` |
+| `Auth__PasswordLoginEnabled` | `false` | `POST /api/Auth/login` | `403 {"code":"password_login_disabled"}` |
 
 `POST /api/Auth/confirm-email` stays available (it only completes links that were already sent).
 In Development both flags are `true` (`appsettings.Development.json`).
@@ -442,9 +477,10 @@ What happens to existing accounts:
 | Not confirmed | cannot log in (unchanged) | cannot log in |
 | Admin | as above for its email kind | as above — make sure every admin has Google linked first |
 
-Transition plan:
+Temporary transition for existing accounts (only if the database already has password users that are not Gmail /
+Workspace — check with the query in step 3):
 
-1. Deploy with the defaults (registration off, login on) and apply the `AddExternalLogins` migration.
+1. Apply the migrations, then in Render **explicitly** set `Auth__PasswordLoginEnabled=true` (registration stays off).
 2. Ask every existing user — administrators first — to sign in and link Google (automatic for Gmail/Workspace,
    `POST /api/Auth/google/link` otherwise; the frontend needs a "Link Google account" action in the profile).
 3. Check who is still unlinked (read-only):
@@ -456,8 +492,40 @@ Transition plan:
      AND NOT EXISTS (SELECT 1 FROM "ExternalLogins" l WHERE l."UserId" = u."Id" AND l."Provider" = 'Google');
    ```
 
-4. When nobody (or nobody who matters) is left, set `Auth__PasswordLoginEnabled=false` in Render. If someone is
-   locked out later, set it back to `true` temporarily (configuration only, no code change), let them link, and switch it off again.
+4. **Switch it off again** — set `Auth__PasswordLoginEnabled=false` (or delete the variable) in Render as soon as the
+   accounts are linked. If someone is locked out later, repeat the same temporary procedure (configuration only,
+   no code change).
+
+### Unconfirmed password accounts and Google sign-in
+
+If an email/password account with the same address exists but was never confirmed, Google sign-in answers
+`409 email_registered_unconfirmed` — also for Gmail and Workspace. This is deliberate:
+
+- **Pre-hijacking:** anyone could register `victim@gmail.com` with a password they know (before registration was
+  disabled). Linking or "confirming" that account when the real owner signs in with Google would give both people
+  access as soon as password login is enabled, and the attacker could watch or modify the victim's data.
+- Taking the account over automatically would require changing its password or deleting it — privileged changes
+  that should not happen as a side effect of signing in.
+- The account itself cannot have any data: password login requires a confirmed email, so an unconfirmed account
+  never had a session.
+
+Safe recovery (manual, by an operator): after verifying that the row is unconfirmed and has no related data, delete
+it (or let a future admin tool do exactly this), then ask the user to sign in with Google again:
+
+```sql
+-- read-only check first
+SELECT u."Id", u."Username", u."Email", u."EmailConfirmed",
+       (SELECT count(*) FROM "UserGames" g WHERE g."UserId" = u."Id") AS library,
+       (SELECT count(*) FROM "GameSubmissions" s WHERE s."SubmittedByUserId" = u."Id") AS submissions,
+       (SELECT count(*) FROM "UserCreatedGames" c WHERE c."UserId" = u."Id") AS own_games
+FROM "Users" u WHERE lower(u."Email") = lower('<email>');
+-- only if EmailConfirmed = false and all counts are 0:
+-- DELETE FROM "Users" WHERE "Id" = <id> AND NOT "EmailConfirmed";
+```
+
+Note: accounts that existed before email confirmation was introduced were marked as confirmed by the
+`AddP1ApiFeatures` migration without ever being verified. For Gmail/Workspace addresses they are linked
+automatically; see "Known Production Limitations".
 
 ### Testing locally
 
@@ -673,6 +741,12 @@ Do not add anything to Render for this — the command is run locally only.
 12. A Google account with an external address (kind "Other") occupies that email in GameNest; if the real mailbox
     owner later signs in with a different Google account, they get `409 account_linked_to_another_google_account`
     and an administrator has to resolve it.
+13. Accounts created before email confirmation existed were marked `EmailConfirmed = true` by `AddP1ApiFeatures`
+    without verification. If someone registered another person's Gmail address back then, that person's first Google
+    sign-in links to the old account (and its password still works whenever password login is enabled). Review such
+    accounts before enabling password login for the transition.
+14. Existing emails that are not lower-case are found by Google sign-in, but not by password login or the admin
+    command (they compare exactly); fix them with the read-only check above and a manual update.
 
 ## License
 
