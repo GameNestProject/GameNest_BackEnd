@@ -32,6 +32,9 @@ public class GameSubmission
 
     public DateTime? ReviewedAt { get; set; }
 
+    /// <summary>When the submission was created (UTC).</summary>
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
     public User SubmittedByUser { get; set; } = null!;
 
     public Game? Game { get; set; }
