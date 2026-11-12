@@ -22,14 +22,19 @@ public record LibraryItemResponse(int Id, int UserId, int GameId, string Status,
     }
 }
 
+/// <summary>
+/// A game submission. <c>GameId</c>: for "Correction" the corrected game; for an approved "NewGame" the catalog game
+/// created by the approval (null while pending or rejected). <c>SubmittedByUsername</c> is the submitter's public username.
+/// </summary>
 public record SubmissionResponse(
     int Id, int SubmittedByUserId, int? GameId, string Type, string Status, string Title, string Description,
     string CoverUrl, string TrailerUrl, string Developer, string Publisher, DateTime? ReleaseDate,
-    string? AdminComment, int? ReviewedByUserId, DateTime? ReviewedAt)
+    string? AdminComment, int? ReviewedByUserId, DateTime? ReviewedAt, DateTime CreatedAt, string? SubmittedByUsername)
 {
-    public static SubmissionResponse From(GameSubmission s) =>
+    public static SubmissionResponse From(GameSubmission s, string? submittedByUsername = null) =>
         new(s.Id, s.SubmittedByUserId, s.GameId, s.Type, s.Status, s.Title, s.Description, s.CoverUrl, s.TrailerUrl,
-            s.Developer, s.Publisher, s.ReleaseDate, s.AdminComment, s.ReviewedByUserId, s.ReviewedAt);
+            s.Developer, s.Publisher, s.ReleaseDate, s.AdminComment, s.ReviewedByUserId, s.ReviewedAt, s.CreatedAt,
+            submittedByUsername ?? s.SubmittedByUser?.Username);
 }
 
 public record UserCreatedGameResponse(
