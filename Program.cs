@@ -96,11 +96,30 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         {
             // Controllers read the user id from this claim; reject tokens that do not carry a valid one
             // so that requests fail with 401 instead of 500.
-            OnTokenValidated = context =>
+            // The role is taken from the database, not from the token: a token keeps the role the user had when signing in,
+            // so a promotion (admin CLI) or demotion would otherwise only apply after the next sign-in, while /api/Profile
+            // (and therefore the frontend) already shows the new role. Tokens of deleted users are rejected.
+            OnTokenValidated = async context =>
             {
                 if (!int.TryParse(context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier), out var userId) || userId <= 0)
+                {
                     context.Fail("The token does not contain a valid user id.");
-                return Task.CompletedTask;
+                    return;
+                }
+                var db = context.HttpContext.RequestServices.GetRequiredService<GameNestDbContext>();
+                var role = await db.Users.AsNoTracking().Where(u => u.Id == userId).Select(u => u.Role)
+                    .SingleOrDefaultAsync(context.HttpContext.RequestAborted);
+                if (role is null)
+                {
+                    context.Fail("The user of this token no longer exists.");
+                    return;
+                }
+                if (context.Principal!.Identity is ClaimsIdentity identity)
+                {
+                    foreach (var claim in identity.FindAll(identity.RoleClaimType).ToList())
+                        identity.RemoveClaim(claim);
+                    identity.AddClaim(new Claim(identity.RoleClaimType, role));
+                }
             }
         };
     });

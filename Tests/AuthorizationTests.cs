@@ -157,3 +157,57 @@ public class OwnershipTests(ApiFactory factory) : IClassFixture<ApiFactory>
         Assert.Equal(HttpStatusCode.NotFound, (await admin.DeleteAsync($"/api/Submissions/{id}")).StatusCode);
     }
 }
+
+/// <summary>
+/// The role is read from the database on every request, not trusted from the token: a token keeps the role of the
+/// moment of sign-in, while /api/Profile (and the frontend) already shows the current one.
+/// </summary>
+public class CurrentRoleFromDatabaseTests(ApiFactory factory) : IClassFixture<ApiFactory>
+{
+    private async Task SetRoleAsync(int userId, string role)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<GameNestDbContext>();
+        await db.Users.Where(u => u.Id == userId).ExecuteUpdateAsync(u => u.SetProperty(x => x.Role, role));
+    }
+
+    [Fact]
+    public async Task User_promoted_after_sign_in_sees_everyones_submissions_with_the_old_token()
+    {
+        var submitter = factory.CreateAuthenticatedClient((await factory.SeedUserAsync()).Id);
+        var id = (await (await submitter.PostAsJsonAsync("/api/Submissions", new { type = "NewGame", title = "Queued " + TestHelpers.UniqueSuffix() })).ReadJsonAsync()).GetProperty("id").GetInt32();
+        var promoted = await factory.SeedUserAsync();
+        var client = factory.CreateAuthenticatedClient(promoted.Id, "User"); // token issued before the promotion
+        await SetRoleAsync(promoted.Id, "Admin");
+
+        var pending = await client.GetAsync("/api/Submissions?status=Pending");
+        Assert.Equal(HttpStatusCode.OK, pending.StatusCode);
+        Assert.Contains((await pending.ReadJsonAsync()).EnumerateArray(), s => s.GetProperty("id").GetInt32() == id);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/Profile/admin")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Admin_demoted_after_sign_in_loses_admin_rights_with_the_old_token()
+    {
+        var submitter = factory.CreateAuthenticatedClient((await factory.SeedUserAsync()).Id);
+        var id = (await (await submitter.PostAsJsonAsync("/api/Submissions", new { type = "NewGame", title = "Other " + TestHelpers.UniqueSuffix() })).ReadJsonAsync()).GetProperty("id").GetInt32();
+        var demoted = await factory.SeedUserAsync("Admin");
+        var client = factory.CreateAuthenticatedClient(demoted.Id, "Admin"); // token issued before the demotion
+        await SetRoleAsync(demoted.Id, "User");
+
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/Profile/admin")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsync($"/api/Submissions/{id}/approve", null)).StatusCode);
+        Assert.DoesNotContain((await (await client.GetAsync("/api/Submissions")).ReadJsonAsync()).EnumerateArray(), s => s.GetProperty("id").GetInt32() == id);
+    }
+
+    [Fact]
+    public async Task Token_of_a_deleted_user_is_rejected_with_401()
+    {
+        var user = await factory.SeedUserAsync("Admin");
+        var client = factory.CreateAuthenticatedClient(user.Id, "Admin");
+        using (var scope = factory.Services.CreateScope())
+            await scope.ServiceProvider.GetRequiredService<GameNestDbContext>().Users.Where(u => u.Id == user.Id).ExecuteDeleteAsync();
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/Submissions")).StatusCode);
+    }
+}
