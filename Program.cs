@@ -33,6 +33,8 @@ var jwtKey = RequireSetting(builder.Configuration, "Jwt:Key");
 // HMAC-SHA256 requires a key of at least 256 bits.
 if (Encoding.UTF8.GetByteCount(jwtKey) < 32)
     throw new InvalidOperationException("Jwt:Key must be at least 32 bytes (256 bits) long.");
+// Fail at startup (not at the first sign-in) when the token lifetime is misconfigured.
+JwtLifetime.From(builder.Configuration);
 var jwtIssuer = RequireSetting(builder.Configuration, "Jwt:Issuer");
 var jwtAudience = RequireSetting(builder.Configuration, "Jwt:Audience");
 var connectionString = RequireSetting(builder.Configuration, "ConnectionStrings:DefaultConnection");

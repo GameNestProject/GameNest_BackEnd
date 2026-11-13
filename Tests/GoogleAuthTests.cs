@@ -117,6 +117,9 @@ public class GoogleAuthEndpointTests(GoogleApiFactory factory) : IClassFixture<G
         Assert.Equal(user.Id.ToString(), jwt.Claims.Single(c => c.Type is ClaimTypes.NameIdentifier or "nameid").Value);
         Assert.Equal("User", jwt.Claims.Single(c => c.Type is ClaimTypes.Role or "role").Value);
         Assert.Equal(ApiFactory.JwtIssuer, jwt.Issuer);
+        // Long-lived session (Jwt:LifetimeDays, 30 days by default): users stay signed in.
+        var expected = DateTime.UtcNow.AddDays(JwtLifetime.DefaultDays);
+        Assert.InRange(jwt.ValidTo, expected.AddMinutes(-5), expected.AddMinutes(5));
         Assert.Equal(HttpStatusCode.OK, (await factory.CreateClientWithToken(token).GetAsync("/api/Profile")).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await factory.CreateClientWithToken(token).GetAsync("/api/Profile/admin")).StatusCode);
     }
