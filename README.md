@@ -9,7 +9,7 @@ REST API for **GameNest** — a web application for browsing a video game catalo
 
 - **Sign-up and sign-in with Google** (Google Identity Services ID token → GameNest JWT) — the public flow for the MVP
 - Email/password registration with mandatory email confirmation and login (kept, switched off by default in production)
-- Password hashing with BCrypt, JWT authentication (HS256, 1 hour)
+- Password hashing with BCrypt, JWT authentication (HS256, 30 days by default — `Jwt__LifetimeDays`)
 - Role-based authorization (`User` and `Admin`)
 - Game catalog, game titles and versions
 - Personal library (status, purchased flag) and user-created games
@@ -114,6 +114,7 @@ or invalid (it never falls back to a built-in key or connection string).
 | `Jwt__Key` | yes | **yes** | JWT signing key, at least 32 bytes; 64 random bytes recommended |
 | `Jwt__Issuer` | yes* | no | Defaults to `GameNestAPI` from `appsettings.json` |
 | `Jwt__Audience` | yes* | no | Defaults to `GameNestClients` from `appsettings.json` |
+| `Jwt__LifetimeDays` | no | no | Token lifetime in days (1–365), default `30` from `appsettings.json`: users stay signed in |
 | `CORS_ALLOWED_ORIGINS` | yes outside Development | no | Comma-separated allowed origins, e.g. `https://gamenest.pp.ua` |
 | `Email__ConfirmationUrlBase` | with Resend | no | Frontend confirmation page; `email` and `token` query parameters are appended |
 | `Resend__ApiKey` | for email delivery | **yes** | Resend API key (sending access). All three `Resend__*` settings or none |
